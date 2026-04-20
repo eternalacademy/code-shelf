@@ -1,0 +1,97 @@
+{
+  "name": "code-shelf",
+  "displayName": "Code Shelf",
+  "description": "Replicates IntelliJ's Shelve Changes feature for VS Code",
+  "version": "1.0.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "test": "npm run compile && node ./node_modules/vscode/bin/test"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.1",
+    "typescript": "^5.3.0"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "code-shelf.shelveChanges",
+        "title": "Code Shelf: Shelve Changes",
+        "category": "Code Shelf"
+      },
+      {
+        "command": "code-shelf.silentShelve",
+        "title": "Code Shelf: Silent Shelve",
+        "category": "Code Shelf"
+      },
+      {
+        "command": "code-shelf.unshelve",
+        "title": "Code Shelf: Unshelve",
+        "category": "Code Shelf"
+      },
+      {
+        "command": "code-shelf.deleteShelf",
+        "title": "Code Shelf: Delete Shelf",
+        "category": "Code Shelf"
+      },
+      {
+        "command": "code-shelf.viewShelfDiff",
+        "title": "Code Shelf: View Shelf Diff",
+        "category": "Code Shelf"
+      }
+    ],
+    "views": {
+      "scm": [
+        {
+          "id": "code-shelf-view",
+          "name": "Code Shelf",
+          "when": "config.code-shelf.enabled"
+        }
+      ]
+    },
+    "menus": {
+      "scm/title": [
+        {
+          "command": "code-shelf.shelveChanges",
+          "group": "Code Shelf@1"
+        },
+        {
+          "command": "code-shelf.silentShelve",
+          "group": "Code Shelf@2"
+        },
+        {
+          "command": "code-shelf.unshelve",
+          "group": "Code Shelf@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Code Shelf",
+      "properties": {
+        "code-shelf.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Code Shelf extension"
+        },
+        "code-shelf.shelfDirectory": {
+          "type": "string",
+          "default": ".vscode/shelf",
+          "description": "Directory to store shelf files"
+        }
+      }
+    }
+  }
+}
