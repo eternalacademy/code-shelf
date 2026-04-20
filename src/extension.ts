@@ -7,7 +7,7 @@ let treeProvider: ShelfTreeProvider;
 
 export function activate(context: vscode.ExtensionContext) {
   try {
-    manager = new ShelfManager();
+    manager = new ShelfManager(context);
   } catch {
     return; // No workspace
   }

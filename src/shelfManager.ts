@@ -18,38 +18,27 @@ export class ShelfManager {
   private shelfDir: string;
   private root: string;
 
-  constructor() {
-    const config = vscode.workspace.getConfiguration('code-shelf');
-    const relPath = config.get<string>('shelfDirectory', '.vscode/shelf');
+  constructor(context: vscode.ExtensionContext) {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!root) {
       throw new Error('No workspace folder found');
     }
     this.root = root;
-    this.shelfDir = path.join(root, relPath);
+
+    // Use VS Code's workspace storage — completely hidden from file explorer and search
+    // Located at e.g. %APPDATA%/Code/User/workspaceStorage/<hash>/code-shelf/
+    const storageUri = context.storageUri;
+    if (!storageUri) {
+      throw new Error('Workspace storage not available');
+    }
+    const storageDir = path.join(storageUri.fsPath, 'code-shelf');
+    this.shelfDir = storageDir;
     this.ensureDir(this.shelfDir);
-    this.ensureGitignore(root, relPath);
   }
 
   private ensureDir(dir: string): void {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
-    }
-  }
-
-  private ensureGitignore(root: string, relPath: string): void {
-    const parts = relPath.replace(/\\/g, '/').split('/');
-    if (parts[0] === '.vscode') {
-      const gitignorePath = path.join(root, '.vscode', '.gitignore');
-      let content = '';
-      if (fs.existsSync(gitignorePath)) {
-        content = fs.readFileSync(gitignorePath, 'utf-8');
-      }
-      const shelfFolder = parts.slice(1).join('/');
-      if (!content.includes(shelfFolder)) {
-        content = content.trimEnd() + '\n' + shelfFolder + '/\n';
-        fs.writeFileSync(gitignorePath, content);
-      }
     }
   }
 
