@@ -8,7 +8,7 @@ IntelliJ-style **Shelve Changes** for VS Code — a lightweight alternative to `
 - Stashes live in git reflog — they pollute your repo history
 - IntelliJ's "Shelve Changes" is local, per-file, and silent — exactly what you need when you just want to quickly park some changes before pulling
 
-**Code Shelf** stores patches in `.vscode/shelf/` (local, gitignored) and lets you shelve/unshelve individual files or all changes with zero git side effects.
+**Code Shelf** stores patches in VS Code's workspace storage (hidden from file explorer and search) and lets you shelve/unshelve individual files or all changes with zero git side effects.
 
 ## Features
 
@@ -44,8 +44,7 @@ For quick parking before a pull: `Code Shelf: Silent Shelve` — no prompts, ins
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `code-shelf.enabled` | `true` | Enable the extension |
-| `code-shelf.shelfDirectory` | `.vscode/shelf` | Where shelves are stored |
+| `code-shelf.enabled` | `true` | Enable Code Shelf extension |
 
 ## vs git stash
 
