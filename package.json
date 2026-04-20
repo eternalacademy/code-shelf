@@ -2,7 +2,7 @@
   "name": "code-shelf",
   "displayName": "Code Shelf",
   "description": "IntelliJ-style Shelve Changes for VS Code — selectively shelve and restore code changes without git stash",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "EternalAcademy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -64,28 +64,58 @@
     "commands": [
       {
         "command": "code-shelf.shelveChanges",
-        "title": "Code Shelf: Shelve Changes",
-        "category": "Code Shelf"
+        "title": "Shelve Changes",
+        "category": "Code Shelf",
+        "icon": "$(archive)"
       },
       {
         "command": "code-shelf.silentShelve",
-        "title": "Code Shelf: Silent Shelve",
+        "title": "Silent Shelve (All Changes)",
+        "category": "Code Shelf",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "code-shelf.shelveStaged",
+        "title": "Shelve Staged Changes",
+        "category": "Code Shelf",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "code-shelf.shelveFile",
+        "title": "Shelve This File",
         "category": "Code Shelf"
       },
       {
         "command": "code-shelf.unshelve",
-        "title": "Code Shelf: Unshelve",
+        "title": "Unshelve",
+        "category": "Code Shelf",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "code-shelf.unshelveFile",
+        "title": "Unshelve This File",
         "category": "Code Shelf"
       },
       {
         "command": "code-shelf.deleteShelf",
-        "title": "Code Shelf: Delete Shelf",
+        "title": "Delete Shelf",
+        "category": "Code Shelf"
+      },
+      {
+        "command": "code-shelf.renameShelf",
+        "title": "Rename Shelf",
         "category": "Code Shelf"
       },
       {
         "command": "code-shelf.viewShelfDiff",
-        "title": "Code Shelf: View Shelf Diff",
+        "title": "View Shelf Diff",
         "category": "Code Shelf"
+      },
+      {
+        "command": "code-shelf.refresh",
+        "title": "Refresh Shelves",
+        "category": "Code Shelf",
+        "icon": "$(refresh)"
       }
     ],
     "views": {
@@ -97,19 +127,76 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "code-shelf-view",
+        "contents": "No shelves yet.\n[Shelve Changes](command:code-shelf.shelveChanges)\n[Silent Shelve](command:code-shelf.silentShelve)\n[Shelve Staged](command:code-shelf.shelveStaged)"
+      }
+    ],
     "menus": {
       "scm/title": [
         {
           "command": "code-shelf.shelveChanges",
-          "group": "Code Shelf@1"
+          "group": "navigation@1"
+        },
+        {
+          "command": "code-shelf.shelveStaged",
+          "group": "navigation@2"
         },
         {
           "command": "code-shelf.silentShelve",
-          "group": "Code Shelf@2"
+          "group": "navigation@3"
+        }
+      ],
+      "scm/resourceGroup/context": [
+        {
+          "command": "code-shelf.shelveChanges",
+          "group": "shelf@1"
         },
         {
+          "command": "code-shelf.shelveStaged",
+          "when": "scmResourceGroup == index",
+          "group": "shelf@2"
+        }
+      ],
+      "scm/resourceState/context": [
+        {
+          "command": "code-shelf.shelveFile",
+          "group": "shelf@1"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "code-shelf.refresh",
+          "when": "view == code-shelf-view",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
           "command": "code-shelf.unshelve",
-          "group": "Code Shelf@3"
+          "when": "view == code-shelf-view && viewItem == shelf",
+          "group": "inline@1"
+        },
+        {
+          "command": "code-shelf.renameShelf",
+          "when": "view == code-shelf-view && viewItem == shelf",
+          "group": "shelf@1"
+        },
+        {
+          "command": "code-shelf.deleteShelf",
+          "when": "view == code-shelf-view && viewItem == shelf",
+          "group": "shelf@2"
+        },
+        {
+          "command": "code-shelf.unshelveFile",
+          "when": "view == code-shelf-view && viewItem == shelfFile",
+          "group": "shelfFile@1"
+        },
+        {
+          "command": "code-shelf.viewShelfDiff",
+          "when": "view == code-shelf-view && viewItem == shelfFile",
+          "group": "inline@1"
         }
       ]
     },

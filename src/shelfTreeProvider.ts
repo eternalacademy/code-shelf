@@ -8,21 +8,32 @@ export class ShelfTreeItem extends vscode.TreeItem {
     public readonly collapsibleState: vscode.TreeItemCollapsibleState,
     public readonly shelfName?: string,
     public readonly filePath?: string,
-    public readonly timestamp?: number
+    public readonly meta?: ShelfMeta
   ) {
     super(label, collapsibleState);
+
     if (filePath && shelfName) {
+      // File node inside a shelf
       this.description = filePath;
-      this.tooltip = `Shelved diff for ${filePath}`;
+      this.tooltip = `Shelved: ${filePath}`;
+      this.iconPath = vscode.ThemeIcon.File;
+      this.contextValue = 'shelfFile';
       this.command = {
         command: 'code-shelf.viewShelfDiff',
         title: 'View Diff',
         arguments: [shelfName, filePath]
       };
-    } else if (shelfName) {
-      this.description = timestamp ? new Date(timestamp).toLocaleString() : '';
-      this.tooltip = `Shelf: ${shelfName}`;
-      this.iconPath = new vscode.ThemeIcon('archive');
+    } else if (shelfName && meta) {
+      // Shelf node
+      const fileCount = meta.files.length;
+      const time = new Date(meta.timestamp).toLocaleString();
+      const typeIcon = meta.type === 'staged' ? 'git-commit' : meta.type === 'silent' ? 'zap' : 'archive';
+      const typeLabel = meta.type === 'staged' ? 'Staged' : meta.type === 'silent' ? 'Silent' : '';
+
+      this.description = `${fileCount} file${fileCount !== 1 ? 's' : ''} · ${time}`;
+      this.tooltip = `${typeLabel ? typeLabel + ' · ' : ''}${fileCount} file${fileCount !== 1 ? 's' : ''}\n${meta.description || ''}`;
+      this.iconPath = new vscode.ThemeIcon(typeIcon);
+      this.contextValue = 'shelf';
     }
   }
 }
@@ -43,10 +54,12 @@ export class ShelfTreeProvider implements vscode.TreeDataProvider<ShelfTreeItem>
 
   async getChildren(element?: ShelfTreeItem): Promise<ShelfTreeItem[]> {
     if (!element) {
-      // Root — show shelves
       const shelves = await this.manager.getShelves();
       if (shelves.length === 0) {
-        return [new ShelfTreeItem('No shelves yet', vscode.TreeItemCollapsibleState.None)];
+        return [new ShelfTreeItem(
+          'No shelves yet — shelve some changes to get started',
+          vscode.TreeItemCollapsibleState.None
+        )];
       }
       return shelves.map(s =>
         new ShelfTreeItem(
@@ -54,24 +67,20 @@ export class ShelfTreeProvider implements vscode.TreeDataProvider<ShelfTreeItem>
           vscode.TreeItemCollapsibleState.Collapsed,
           s.name,
           undefined,
-          s.timestamp
+          s
         )
       );
     }
 
-    if (element.shelfName && !element.filePath) {
-      // Shelf — show files
-      const shelves = await this.manager.getShelves();
-      const shelf = shelves.find(s => s.name === element.shelfName);
-      if (!shelf) return [];
-
+    if (element.shelfName && !element.filePath && element.meta) {
+      const shelf = element.meta;
       return shelf.files.map(f =>
         new ShelfTreeItem(
           path.basename(f),
           vscode.TreeItemCollapsibleState.None,
           element.shelfName,
           f,
-          shelf.timestamp
+          shelf
         )
       );
     }

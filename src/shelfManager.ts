@@ -11,10 +11,12 @@ export interface ShelfMeta {
   timestamp: number;
   files: string[];
   description?: string;
+  type?: 'changes' | 'staged' | 'silent';
 }
 
 export class ShelfManager {
   private shelfDir: string;
+  private root: string;
 
   constructor() {
     const config = vscode.workspace.getConfiguration('code-shelf');
@@ -23,10 +25,9 @@ export class ShelfManager {
     if (!root) {
       throw new Error('No workspace folder found');
     }
+    this.root = root;
     this.shelfDir = path.join(root, relPath);
     this.ensureDir(this.shelfDir);
-
-    // Ensure shelf dir is gitignored
     this.ensureGitignore(root, relPath);
   }
 
@@ -37,7 +38,6 @@ export class ShelfManager {
   }
 
   private ensureGitignore(root: string, relPath: string): void {
-    // Add shelf directory to .gitignore inside .vscode/
     const parts = relPath.replace(/\\/g, '/').split('/');
     if (parts[0] === '.vscode') {
       const gitignorePath = path.join(root, '.vscode', '.gitignore');
@@ -54,22 +54,15 @@ export class ShelfManager {
   }
 
   private async git(args: string): Promise<string> {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    const { stdout } = await execAsync(`git ${args}`, { cwd: root, maxBuffer: 50 * 1024 * 1024 });
+    const { stdout } = await execAsync(`git ${args}`, { cwd: this.root, maxBuffer: 50 * 1024 * 1024 });
     return stdout;
   }
 
-  /**
-   * Check if a file is tracked by git.
-   * Uses git ls-files — returns true only if the file is tracked.
-   * Handles the case where git ls-files --error-unmatch exits non-zero for untracked files.
-   */
   private async isTracked(file: string): Promise<boolean> {
     try {
       const result = await this.git(`ls-files --error-unmatch "${file}"`);
       return result.trim().length > 0;
     } catch {
-      // git ls-files --error-unmatch returns non-zero for untracked files
       return false;
     }
   }
@@ -80,16 +73,19 @@ export class ShelfManager {
     return [...tracked, ...untracked];
   }
 
-  async shelve(files: string[], name: string, description?: string): Promise<boolean> {
+  async getStagedFiles(): Promise<string[]> {
+    const staged = (await this.git('diff --cached --name-only')).split('\n').filter(f => f.trim());
+    return staged;
+  }
+
+  async shelve(files: string[], name: string, description?: string, type: 'changes' | 'staged' | 'silent' = 'changes'): Promise<boolean> {
     try {
       const shelfPath = path.join(this.shelfDir, this.sanitizeName(name));
       this.ensureDir(shelfPath);
 
-      // Save metadata
-      const meta: ShelfMeta = { name, timestamp: Date.now(), files, description };
+      const meta: ShelfMeta = { name, timestamp: Date.now(), files, description, type };
       fs.writeFileSync(path.join(shelfPath, 'metadata.json'), JSON.stringify(meta, null, 2));
 
-      // Separate into tracked and untracked
       const trackedFiles: string[] = [];
       const untrackedFiles: string[] = [];
 
@@ -102,9 +98,12 @@ export class ShelfManager {
       }
 
       // Save patches for tracked modified files
+      const isStaged = type === 'staged';
+      const diffFlag = isStaged ? 'diff --cached' : 'diff';
+
       for (const file of trackedFiles) {
         const safeName = file.replace(/[\\/]/g, '__');
-        const diff = await this.git(`diff -- "${file}"`);
+        const diff = await this.git(`${diffFlag} -- "${file}"`);
         if (diff.trim()) {
           fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
         }
@@ -113,25 +112,30 @@ export class ShelfManager {
       // Save full content for untracked files
       for (const file of untrackedFiles) {
         const safeName = file.replace(/[\\/]/g, '__');
-        const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
-        const fullPath = path.join(root, file);
+        const fullPath = path.join(this.root, file);
         if (fs.existsSync(fullPath)) {
           const content = fs.readFileSync(fullPath);
           fs.writeFileSync(path.join(shelfPath, `${safeName}.full`), content);
-          // Mark as new file for unshelve
           fs.writeFileSync(path.join(shelfPath, `${safeName}.new`), file);
         }
       }
 
-      // Revert tracked files
-      if (trackedFiles.length > 0) {
-        await this.git(`checkout -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
+      // Revert changes
+      if (isStaged) {
+        // For staged: unstage (git reset), then checkout to revert content
+        if (trackedFiles.length > 0) {
+          await this.git(`reset HEAD -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
+          await this.git(`checkout -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
+        }
+      } else {
+        if (trackedFiles.length > 0) {
+          await this.git(`checkout -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
+        }
       }
 
       // Delete untracked files
       for (const file of untrackedFiles) {
-        const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
-        const fullPath = path.join(root, file);
+        const fullPath = path.join(this.root, file);
         if (fs.existsSync(fullPath)) {
           fs.unlinkSync(fullPath);
         }
@@ -144,46 +148,15 @@ export class ShelfManager {
     }
   }
 
-  async getShelves(): Promise<ShelfMeta[]> {
-    if (!fs.existsSync(this.shelfDir)) return [];
-
-    const shelves: ShelfMeta[] = [];
-    for (const name of fs.readdirSync(this.shelfDir)) {
-      const metaPath = path.join(this.shelfDir, name, 'metadata.json');
-      if (fs.existsSync(metaPath)) {
-        shelves.push(JSON.parse(fs.readFileSync(metaPath, 'utf-8')));
-      }
-    }
-    return shelves.sort((a, b) => b.timestamp - a.timestamp);
-  }
-
   async unshelve(name: string): Promise<boolean> {
     try {
       const shelfPath = path.join(this.shelfDir, this.sanitizeName(name));
       if (!fs.existsSync(shelfPath)) throw new Error(`Shelf "${name}" not found`);
 
       const meta: ShelfMeta = JSON.parse(fs.readFileSync(path.join(shelfPath, 'metadata.json'), 'utf-8'));
-      const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
 
       for (const file of meta.files) {
-        const safeName = file.replace(/[\\/]/g, '__');
-
-        // Apply patch for tracked modified files
-        const patchFile = path.join(shelfPath, `${safeName}.patch`);
-        if (fs.existsSync(patchFile)) {
-          await this.git(`apply "${patchFile}"`);
-        }
-
-        // Restore untracked new files
-        const newMarker = path.join(shelfPath, `${safeName}.new`);
-        if (fs.existsSync(newMarker)) {
-          const fullFile = path.join(shelfPath, `${safeName}.full`);
-          if (fs.existsSync(fullFile)) {
-            const targetPath = path.join(root, file);
-            this.ensureDir(path.dirname(targetPath));
-            fs.copyFileSync(fullFile, targetPath);
-          }
-        }
+        await this.unshelveFile(name, file);
       }
 
       return true;
@@ -191,6 +164,75 @@ export class ShelfManager {
       vscode.window.showErrorMessage(`Failed to unshelve: ${(error as Error).message}`);
       return false;
     }
+  }
+
+  async unshelveFile(shelfName: string, file: string): Promise<boolean> {
+    try {
+      const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
+      if (!fs.existsSync(shelfPath)) throw new Error(`Shelf "${shelfName}" not found`);
+
+      const safeName = file.replace(/[\\/]/g, '__');
+
+      // Apply patch for tracked modified files
+      const patchFile = path.join(shelfPath, `${safeName}.patch`);
+      if (fs.existsSync(patchFile)) {
+        await this.git(`apply "${patchFile}"`);
+      }
+
+      // Restore untracked new files
+      const newMarker = path.join(shelfPath, `${safeName}.new`);
+      if (fs.existsSync(newMarker)) {
+        const fullFile = path.join(shelfPath, `${safeName}.full`);
+        if (fs.existsSync(fullFile)) {
+          const targetPath = path.join(this.root, file);
+          this.ensureDir(path.dirname(targetPath));
+          fs.copyFileSync(fullFile, targetPath);
+        }
+      }
+
+      return true;
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to unshelve file: ${(error as Error).message}`);
+      return false;
+    }
+  }
+
+  async renameShelf(oldName: string, newName: string): Promise<boolean> {
+    try {
+      const oldPath = path.join(this.shelfDir, this.sanitizeName(oldName));
+      const newPath = path.join(this.shelfDir, this.sanitizeName(newName));
+      if (!fs.existsSync(oldPath)) throw new Error(`Shelf "${oldName}" not found`);
+      if (fs.existsSync(newPath)) throw new Error(`Shelf "${newName}" already exists`);
+
+      // Update metadata
+      const metaPath = path.join(oldPath, 'metadata.json');
+      const meta: ShelfMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      meta.name = newName;
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+
+      fs.renameSync(oldPath, newPath);
+      return true;
+    } catch (error) {
+      vscode.window.showErrorMessage(`Failed to rename: ${(error as Error).message}`);
+      return false;
+    }
+  }
+
+  async getShelves(): Promise<ShelfMeta[]> {
+    if (!fs.existsSync(this.shelfDir)) return [];
+
+    const shelves: ShelfMeta[] = [];
+    for (const name of fs.readdirSync(this.shelfDir)) {
+      const metaPath = path.join(this.shelfDir, name, 'metadata.json');
+      if (fs.existsSync(metaPath)) {
+        try {
+          shelves.push(JSON.parse(fs.readFileSync(metaPath, 'utf-8')));
+        } catch {
+          // Skip corrupted metadata
+        }
+      }
+    }
+    return shelves.sort((a, b) => b.timestamp - a.timestamp);
   }
 
   async deleteShelf(name: string): Promise<boolean> {
@@ -215,7 +257,6 @@ export class ShelfManager {
       return '';
     }
 
-    // Combine all diffs
     let combined = '';
     for (const f of fs.readdirSync(shelfPath)) {
       if (f.endsWith('.patch')) {
@@ -230,6 +271,13 @@ export class ShelfManager {
     const safeName = file.replace(/[\\/]/g, '__');
     const p = path.join(shelfPath, `${safeName}.patch`);
     return fs.existsSync(p) ? p : undefined;
+  }
+
+  getShelfFilePath(shelfName: string, file: string): string | undefined {
+    const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
+    const safeName = file.replace(/[\\/]/g, '__');
+    const full = path.join(shelfPath, `${safeName}.full`);
+    return fs.existsSync(full) ? full : undefined;
   }
 
   private sanitizeName(name: string): string {

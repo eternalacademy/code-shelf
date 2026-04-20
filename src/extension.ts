@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(treeView);
 
-  // Shelve Changes — select files, name the shelf
+  // ─── Shelve Changes — select files, name the shelf ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.shelveChanges', async () => {
       const modified = await manager.getModifiedFiles();
@@ -49,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Silent Shelve — all changes, auto-named
+  // ─── Silent Shelve — all changes, auto-named ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.silentShelve', async () => {
       const modified = await manager.getModifiedFiles();
@@ -59,7 +59,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       const name = `silent-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-      const success = await manager.shelve(modified, name);
+      const success = await manager.shelve(modified, name, undefined, 'silent');
       if (success) {
         vscode.window.showInformationMessage(`Silently shelved ${modified.length} file(s) as "${name}"`);
         treeProvider.refresh();
@@ -67,7 +67,80 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Unshelve
+  // ─── Shelve Staged Changes ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.shelveStaged', async () => {
+      const staged = await manager.getStagedFiles();
+      if (staged.length === 0) {
+        vscode.window.showInformationMessage('No staged changes to shelve.');
+        return;
+      }
+
+      const name = await vscode.window.showInputBox({
+        prompt: 'Shelf name for staged changes',
+        placeHolder: 'staged-shelf',
+        value: `staged-${Date.now()}`
+      });
+      if (!name) return;
+
+      const success = await manager.shelve(staged, name, undefined, 'staged');
+      if (success) {
+        vscode.window.showInformationMessage(`Shelved ${staged.length} staged file(s) as "${name}"`);
+        treeProvider.refresh();
+      }
+    })
+  );
+
+  // ─── Shelve Single File (from SCM context menu) ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.shelveFile', async (...args: any[]) => {
+      // When called from scm/resourceState/context, args[0] is a SourceControlResourceState
+      // We need to extract the file path from the URI
+      const files: string[] = [];
+
+      for (const arg of args) {
+        if (arg?.uri?.fsPath) {
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+          const rel = path.relative(root, arg.uri.fsPath).replace(/\\/g, '/');
+          if (rel) files.push(rel);
+        } else if (arg?.resourceUri?.fsPath) {
+          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+          const rel = path.relative(root, arg.resourceUri.fsPath).replace(/\\/g, '/');
+          if (rel) files.push(rel);
+        }
+      }
+
+      if (files.length === 0) {
+        // Fallback: let user pick
+        const modified = await manager.getModifiedFiles();
+        if (modified.length === 0) {
+          vscode.window.showInformationMessage('No modified files to shelve.');
+          return;
+        }
+        const picked = await vscode.window.showQuickPick(
+          modified.map(f => ({ label: f })),
+          { canPickMany: true, placeHolder: 'Select files to shelve' }
+        );
+        if (!picked || picked.length === 0) return;
+        files.push(...picked.map(p => p.label));
+      }
+
+      const name = await vscode.window.showInputBox({
+        prompt: 'Shelf name',
+        placeHolder: 'my-shelf',
+        value: `shelf-${Date.now()}`
+      });
+      if (!name) return;
+
+      const success = await manager.shelve(files, name);
+      if (success) {
+        vscode.window.showInformationMessage(`Shelved ${files.length} file(s) as "${name}"`);
+        treeProvider.refresh();
+      }
+    })
+  );
+
+  // ─── Unshelve ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.unshelve', async (item?: ShelfTreeItem) => {
       const name = await pickShelf(item?.shelfName);
@@ -81,7 +154,23 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Delete Shelf
+  // ─── Unshelve Single File (from tree context) ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.unshelveFile', async (item?: ShelfTreeItem) => {
+      if (!item?.shelfName || !item?.filePath) {
+        vscode.window.showWarningMessage('Select a file from a shelf to unshelve.');
+        return;
+      }
+
+      const success = await manager.unshelveFile(item.shelfName, item.filePath);
+      if (success) {
+        vscode.window.showInformationMessage(`Unshelved "${item.filePath}" from "${item.shelfName}"`);
+        treeProvider.refresh();
+      }
+    })
+  );
+
+  // ─── Delete Shelf ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.deleteShelf', async (item?: ShelfTreeItem) => {
       const name = await pickShelf(item?.shelfName);
@@ -100,7 +189,27 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // View Diff
+  // ─── Rename Shelf ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.renameShelf', async (item?: ShelfTreeItem) => {
+      const oldName = item?.shelfName || await pickShelf();
+      if (!oldName) return;
+
+      const newName = await vscode.window.showInputBox({
+        prompt: `Rename shelf "${oldName}" to:`,
+        value: oldName
+      });
+      if (!newName || newName === oldName) return;
+
+      const success = await manager.renameShelf(oldName, newName);
+      if (success) {
+        vscode.window.showInformationMessage(`Renamed "${oldName}" to "${newName}"`);
+        treeProvider.refresh();
+      }
+    })
+  );
+
+  // ─── View Diff ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.viewShelfDiff', async (shelfName?: string, filePath?: string) => {
       const name = shelfName || await pickShelf();
@@ -112,14 +221,24 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
+      const title = filePath ? `${name} — ${filePath}` : `${name} — diff`;
       const doc = await vscode.workspace.openTextDocument({
         content: diff,
         language: 'diff'
       });
       await vscode.window.showTextDocument(doc, { preview: true });
+      vscode.window.activeTextEditor && (vscode.window.activeTextEditor.document.fileName);
     })
   );
 
+  // ─── Refresh Tree ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.refresh', () => {
+      treeProvider.refresh();
+    })
+  );
+
+  // ─── Helper ───
   async function pickShelf(preselected?: string): Promise<string | undefined> {
     if (preselected) return preselected;
     const shelves = await manager.getShelves();
@@ -130,13 +249,16 @@ export function activate(context: vscode.ExtensionContext) {
     const picked = await vscode.window.showQuickPick(
       shelves.map(s => ({
         label: s.name,
-        description: new Date(s.timestamp).toLocaleString(),
-        detail: `${s.files.length} file(s)`
+        description: `${s.files.length} file(s)`,
+        detail: new Date(s.timestamp).toLocaleString()
       })),
       { placeHolder: 'Select a shelf' }
     );
     return picked?.label;
   }
 }
+
+// Need path for shelveFile command
+import * as path from 'path';
 
 export function deactivate() {}
