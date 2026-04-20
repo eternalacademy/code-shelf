@@ -1,5 +1,8 @@
 src/**
 **/*.ts
 **/*.map
+**/*.svg
 node_modules/**
 .vscode-test/**
+test-workspace/**
+FEATURES.md

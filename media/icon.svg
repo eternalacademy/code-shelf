@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="shelfGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6C63FF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3F3D9E;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="plankGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#8B83FF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#6C63FF;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Background rounded square -->
+  <rect x="4" y="4" width="120" height="120" rx="24" ry="24" fill="url(#shelfGrad)"/>
+  <!-- Shelf frame - left side -->
+  <rect x="24" y="18" width="6" height="92" rx="2" fill="#4A48B0" opacity="0.9"/>
+  <!-- Shelf frame - right side -->
+  <rect x="98" y="18" width="6" height="92" rx="2" fill="#4A48B0" opacity="0.9"/>
+  <!-- Shelf planks -->
+  <rect x="24" y="42" width="80" height="5" rx="2" fill="url(#plankGrad)"/>
+  <rect x="24" y="68" width="80" height="5" rx="2" fill="url(#plankGrad)"/>
+  <rect x="24" y="94" width="80" height="5" rx="2" fill="url(#plankGrad)"/>
+  <!-- Books on top shelf -->
+  <rect x="32" y="24" width="10" height="18" rx="2" fill="#FF6B9D"/>
+  <rect x="44" y="27" width="8" height="15" rx="2" fill="#FFD93D"/>
+  <rect x="54" y="22" width="10" height="20" rx="2" fill="#6BCB77"/>
+  <rect x="66" y="26" width="8" height="16" rx="2" fill="#4FC3F7"/>
+  <rect x="76" y="24" width="10" height="18" rx="2" fill="#FF8A65"/>
+  <!-- Code brackets on middle shelf -->
+  <text x="38" y="62" font-family="monospace" font-size="16" font-weight="bold" fill="#FFFFFF" opacity="0.95">{</text>
+  <text x="52" y="62" font-family="monospace" font-size="16" font-weight="bold" fill="#FFD93D" opacity="0.95">...</text>
+  <text x="74" y="62" font-family="monospace" font-size="16" font-weight="bold" fill="#FFFFFF" opacity="0.95">}</text>
+  <!-- Small arrow/diff indicator on bottom shelf -->
+  <text x="34" y="89" font-family="monospace" font-size="12" fill="#6BCB77" opacity="0.9">+</text>
+  <text x="48" y="89" font-family="monospace" font-size="12" fill="#FF6B9D" opacity="0.9">-</text>
+  <text x="62" y="89" font-family="monospace" font-size="12" fill="#4FC3F7" opacity="0.9">~</text>
+  <text x="76" y="89" font-family="monospace" font-size="12" fill="#6BCB77" opacity="0.9">+</text>
+</svg>

@@ -1,13 +1,47 @@
 {
   "name": "code-shelf",
   "displayName": "Code Shelf",
-  "description": "Replicates IntelliJ's Shelve Changes feature for VS Code",
-  "version": "1.0.0",
+  "description": "IntelliJ-style Shelve Changes for VS Code — selectively shelve and restore code changes without git stash",
+  "version": "1.1.0",
+  "publisher": "EternalAcademy",
+  "license": "MIT",
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": [
+    "SCM Providers",
     "Other"
+  ],
+  "keywords": [
+    "shelve",
+    "shelf",
+    "stash",
+    "intellij",
+    "changes",
+    "patch",
+    "git",
+    "source control"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eternalacademy/code-shelf"
+  },
+  "bugs": {
+    "url": "https://github.com/eternalacademy/code-shelf/issues"
+  },
+  "homepage": "https://github.com/eternalacademy/code-shelf#readme",
+  "galleryBanner": {
+    "color": "#1e1e2e",
+    "theme": "dark"
+  },
+  "qna": "marketplace",
+  "badges": [],
+  "maintainers": [
+    {
+      "name": "Umesh Saini",
+      "url": "https://github.com/umeshsaini17"
+    }
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -23,6 +57,7 @@
     "@types/node": "18.x",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.9.1",
+    "sharp": "^0.34.5",
     "typescript": "^5.3.0"
   },
   "contributes": {
