@@ -9,7 +9,7 @@ export function activate(context: vscode.ExtensionContext) {
   try {
     manager = new ShelfManager(context);
   } catch {
-    return; // No workspace
+    return;
   }
 
   treeProvider = new ShelfTreeProvider(manager);
@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(treeView);
 
-  // ─── Shelve Changes — select files, name the shelf ───
+  // ─── Shelve Changes ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.shelveChanges', async () => {
       const modified = await manager.getModifiedFiles();
@@ -49,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // ─── Silent Shelve — all changes, auto-named ───
+  // ─── Silent Shelve ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.silentShelve', async () => {
       const modified = await manager.getModifiedFiles();
@@ -94,24 +94,20 @@ export function activate(context: vscode.ExtensionContext) {
   // ─── Shelve Single File (from SCM context menu) ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.shelveFile', async (...args: any[]) => {
-      // When called from scm/resourceState/context, args[0] is a SourceControlResourceState
-      // We need to extract the file path from the URI
       const files: string[] = [];
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
       for (const arg of args) {
         if (arg?.uri?.fsPath) {
-          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
           const rel = path.relative(root, arg.uri.fsPath).replace(/\\/g, '/');
           if (rel) files.push(rel);
         } else if (arg?.resourceUri?.fsPath) {
-          const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
           const rel = path.relative(root, arg.resourceUri.fsPath).replace(/\\/g, '/');
           if (rel) files.push(rel);
         }
       }
 
       if (files.length === 0) {
-        // Fallback: let user pick
         const modified = await manager.getModifiedFiles();
         if (modified.length === 0) {
           vscode.window.showInformationMessage('No modified files to shelve.');
@@ -154,7 +150,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // ─── Unshelve Single File (from tree context) ───
+  // ─── Unshelve Single File ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.unshelveFile', async (item?: ShelfTreeItem) => {
       if (!item?.shelfName || !item?.filePath) {
@@ -211,7 +207,21 @@ export function activate(context: vscode.ExtensionContext) {
 
   // ─── View Diff ───
   context.subscriptions.push(
-    vscode.commands.registerCommand('code-shelf.viewShelfDiff', async (shelfName?: string, filePath?: string) => {
+    vscode.commands.registerCommand('code-shelf.viewShelfDiff', async (...args: any[]) => {
+      // Args can be: [shelfName, filePath] from tree command, or [ShelfTreeItem] from context menu
+      let shelfName: string | undefined;
+      let filePath: string | undefined;
+
+      for (const arg of args) {
+        if (arg instanceof ShelfTreeItem) {
+          shelfName = arg.shelfName;
+          filePath = arg.filePath;
+        } else if (typeof arg === 'string') {
+          if (!shelfName) { shelfName = arg; }
+          else if (!filePath) { filePath = arg; }
+        }
+      }
+
       const name = shelfName || await pickShelf();
       if (!name) return;
 
@@ -221,13 +231,12 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      const title = filePath ? `${name} — ${filePath}` : `${name} — diff`;
+      const title = filePath ? `${name} — ${path.basename(filePath)}` : `${name} — diff`;
       const doc = await vscode.workspace.openTextDocument({
         content: diff,
         language: 'diff'
       });
       await vscode.window.showTextDocument(doc, { preview: true });
-      vscode.window.activeTextEditor && (vscode.window.activeTextEditor.document.fileName);
     })
   );
 
@@ -258,7 +267,6 @@ export function activate(context: vscode.ExtensionContext) {
   }
 }
 
-// Need path for shelveFile command
 import * as path from 'path';
 
 export function deactivate() {}

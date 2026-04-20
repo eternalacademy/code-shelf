@@ -226,12 +226,6 @@ export class ShelfManager {
 
       const safeName = file.replace(/[\\/]/g, '__');
 
-      // Apply patch for tracked modified files
-      const patchFile = path.join(shelfPath, `${safeName}.patch`);
-      if (fs.existsSync(patchFile)) {
-        await this.git(`apply "${patchFile}"`);
-      }
-
       // Restore new files (added-to-index or untracked)
       const newMarker = path.join(shelfPath, `${safeName}.new`);
       if (fs.existsSync(newMarker)) {
@@ -241,6 +235,24 @@ export class ShelfManager {
           this.ensureDir(path.dirname(targetPath));
           fs.copyFileSync(fullFile, targetPath);
         }
+        return true;
+      }
+
+      // Apply patch for tracked modified / deleted files
+      const patchFile = path.join(shelfPath, `${safeName}.patch`);
+      if (fs.existsSync(patchFile)) {
+        // For deleted files: the file may not exist on disk. Restore from HEAD first so git apply can work.
+        const fullPath = path.join(this.root, file);
+        if (!fs.existsSync(fullPath)) {
+          try {
+            await this.git(`checkout HEAD -- "${file}"`);
+          } catch {
+            // File may not exist in HEAD either (shouldn't happen for tracked), create empty
+            this.ensureDir(path.dirname(fullPath));
+            fs.writeFileSync(fullPath, '');
+          }
+        }
+        await this.git(`apply "${patchFile}"`);
       }
 
       return true;
