@@ -67,15 +67,44 @@ export class ShelfManager {
     }
   }
 
+  /**
+   * Get all modified files — includes unstaged, staged, and untracked.
+   */
   async getModifiedFiles(): Promise<string[]> {
     const tracked = (await this.git('diff --name-only')).split('\n').filter(f => f.trim());
+    const staged = (await this.git('diff --cached --name-only')).split('\n').filter(f => f.trim());
     const untracked = (await this.git('ls-files --others --exclude-standard')).split('\n').filter(f => f.trim());
-    return [...tracked, ...untracked];
+    return [...new Set([...tracked, ...staged, ...untracked])];
   }
 
   async getStagedFiles(): Promise<string[]> {
-    const staged = (await this.git('diff --cached --name-only')).split('\n').filter(f => f.trim());
-    return staged;
+    return (await this.git('diff --cached --name-only')).split('\n').filter(f => f.trim());
+  }
+
+  /**
+   * Get the effective diff for a file from HEAD (includes both staged and unstaged changes).
+   */
+  private async getEffectiveDiff(file: string): Promise<string> {
+    let stagedDiff = '';
+    try { stagedDiff = (await this.git(`diff --cached -- "${file}"`)).trim(); } catch { /* no staged changes */ }
+
+    let unstagedDiff = '';
+    try { unstagedDiff = (await this.git(`diff -- "${file}"`)).trim(); } catch { /* no unstaged changes */ }
+
+    if (stagedDiff && unstagedDiff) {
+      return (await this.git(`diff HEAD -- "${file}"`)).trim();
+    }
+    return stagedDiff || unstagedDiff;
+  }
+
+  /**
+   * Revert tracked files to HEAD state — unstage + checkout.
+   */
+  private async revertToHead(files: string[]): Promise<void> {
+    if (files.length === 0) return;
+    const fileArgs = files.map(f => `"${f}"`).join(' ');
+    await this.git(`reset HEAD -- ${fileArgs}`);
+    await this.git(`checkout HEAD -- ${fileArgs}`);
   }
 
   async shelve(files: string[], name: string, description?: string, type: 'changes' | 'staged' | 'silent' = 'changes'): Promise<boolean> {
@@ -97,14 +126,20 @@ export class ShelfManager {
         }
       }
 
-      // Save patches for tracked modified files
-      const isStaged = type === 'staged';
-      const diffFlag = isStaged ? 'diff --cached' : 'diff';
-
+      // Save patches for tracked files
       for (const file of trackedFiles) {
         const safeName = file.replace(/[\\/]/g, '__');
-        const diff = await this.git(`${diffFlag} -- "${file}"`);
-        if (diff.trim()) {
+        let diff: string;
+
+        if (type === 'staged') {
+          // Only shelving the staged portion
+          diff = (await this.git(`diff --cached -- "${file}"`)).trim();
+        } else {
+          // Shelving all changes from HEAD
+          diff = await this.getEffectiveDiff(file);
+        }
+
+        if (diff) {
           fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
         }
       }
@@ -120,18 +155,8 @@ export class ShelfManager {
         }
       }
 
-      // Revert changes
-      if (isStaged) {
-        // For staged: unstage (git reset), then checkout to revert content
-        if (trackedFiles.length > 0) {
-          await this.git(`reset HEAD -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
-          await this.git(`checkout -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
-        }
-      } else {
-        if (trackedFiles.length > 0) {
-          await this.git(`checkout -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
-        }
-      }
+      // Revert tracked files to HEAD (unstage + checkout)
+      await this.revertToHead(trackedFiles);
 
       // Delete untracked files
       for (const file of untrackedFiles) {
@@ -173,13 +198,11 @@ export class ShelfManager {
 
       const safeName = file.replace(/[\\/]/g, '__');
 
-      // Apply patch for tracked modified files
       const patchFile = path.join(shelfPath, `${safeName}.patch`);
       if (fs.existsSync(patchFile)) {
         await this.git(`apply "${patchFile}"`);
       }
 
-      // Restore untracked new files
       const newMarker = path.join(shelfPath, `${safeName}.new`);
       if (fs.existsSync(newMarker)) {
         const fullFile = path.join(shelfPath, `${safeName}.full`);
@@ -204,7 +227,6 @@ export class ShelfManager {
       if (!fs.existsSync(oldPath)) throw new Error(`Shelf "${oldName}" not found`);
       if (fs.existsSync(newPath)) throw new Error(`Shelf "${newName}" already exists`);
 
-      // Update metadata
       const metaPath = path.join(oldPath, 'metadata.json');
       const meta: ShelfMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       meta.name = newName;
