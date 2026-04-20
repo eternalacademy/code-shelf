@@ -131,8 +131,20 @@ export class ShelfManager {
         }
       }
 
-      // Save diffs for committed-modified files
+      // Save patches for committed-modified files
+      // Split into: modified (file exists) vs deleted (file gone but in HEAD)
+      const modifiedTracked: string[] = [];
+      const deletedTracked: string[] = [];
       for (const file of committedModified) {
+        if (fs.existsSync(path.join(this.root, file))) {
+          modifiedTracked.push(file);
+        } else {
+          deletedTracked.push(file);
+        }
+      }
+
+      // Save diffs for modified files (file still exists)
+      for (const file of modifiedTracked) {
         const safeName = file.replace(/[\\/]/g, '__');
         let diff: string;
         if (type === 'staged') {
@@ -143,6 +155,14 @@ export class ShelfManager {
         if (diff) {
           fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
         }
+      }
+
+      // Save HEAD content for deleted files (can't use git apply for deletions reliably)
+      for (const file of deletedTracked) {
+        const safeName = file.replace(/[\\/]/g, '__');
+        const headContent = await this.git(`show HEAD:"${file}"`);
+        fs.writeFileSync(path.join(shelfPath, `${safeName}.head`), headContent);
+        fs.writeFileSync(path.join(shelfPath, `${safeName}.deleted`), file);
       }
 
       // Save full content for added-to-index files
@@ -167,9 +187,16 @@ export class ShelfManager {
         }
       }
 
-      // Revert: committed-modified → reset + checkout HEAD
-      if (committedModified.length > 0) {
-        const fileArgs = committedModified.map(f => `"${f}"`).join(' ');
+      // Revert: modified tracked → reset + checkout HEAD
+      if (modifiedTracked.length > 0) {
+        const fileArgs = modifiedTracked.map(f => `"${f}"`).join(' ');
+        await this.git(`reset HEAD -- ${fileArgs}`);
+        await this.git(`checkout HEAD -- ${fileArgs}`);
+      }
+
+      // Revert: deleted tracked → restore from HEAD (already reverted, but reset staging if needed)
+      if (deletedTracked.length > 0) {
+        const fileArgs = deletedTracked.map(f => `"${f}"`).join(' ');
         await this.git(`reset HEAD -- ${fileArgs}`);
         await this.git(`checkout HEAD -- ${fileArgs}`);
       }
@@ -238,16 +265,24 @@ export class ShelfManager {
         return true;
       }
 
-      // Apply patch for tracked modified / deleted files
+      // Restore deleted files — just delete the file from disk
+      const deletedMarker = path.join(shelfPath, `${safeName}.deleted`);
+      if (fs.existsSync(deletedMarker)) {
+        const fullPath = path.join(this.root, file);
+        if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+        }
+        return true;
+      }
+
+      // Apply patch for tracked modified files
       const patchFile = path.join(shelfPath, `${safeName}.patch`);
       if (fs.existsSync(patchFile)) {
-        // For deleted files: the file may not exist on disk. Restore from HEAD first so git apply can work.
         const fullPath = path.join(this.root, file);
         if (!fs.existsSync(fullPath)) {
           try {
             await this.git(`checkout HEAD -- "${file}"`);
           } catch {
-            // File may not exist in HEAD either (shouldn't happen for tracked), create empty
             this.ensureDir(path.dirname(fullPath));
             fs.writeFileSync(fullPath, '');
           }
@@ -318,6 +353,8 @@ export class ShelfManager {
       if (fs.existsSync(patchFile)) return fs.readFileSync(patchFile, 'utf-8');
       const fullFile = path.join(shelfPath, `${safeName}.full`);
       if (fs.existsSync(fullFile)) return `--- /dev/null\n+++ b/${file}\n${fs.readFileSync(fullFile, 'utf-8')}`;
+      const deletedFile = path.join(shelfPath, `${safeName}.head`);
+      if (fs.existsSync(deletedFile)) return `--- a/${file}\n+++ /dev/null\n${fs.readFileSync(deletedFile, 'utf-8').split('\n').map(l => '-' + l).join('\n')}`;
       return '';
     }
 
