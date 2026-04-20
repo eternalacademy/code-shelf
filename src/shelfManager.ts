@@ -26,7 +26,6 @@ export class ShelfManager {
     this.root = root;
 
     // Use VS Code's workspace storage — completely hidden from file explorer and search
-    // Located at e.g. %APPDATA%/Code/User/workspaceStorage/<hash>/code-shelf/
     const storageUri = context.storageUri;
     if (!storageUri) {
       throw new Error('Workspace storage not available');
@@ -47,10 +46,26 @@ export class ShelfManager {
     return stdout;
   }
 
-  private async isTracked(file: string): Promise<boolean> {
+  /**
+   * Check if a file is in the git index (staged or tracked).
+   */
+  private async isInIndex(file: string): Promise<boolean> {
     try {
       const result = await this.git(`ls-files --error-unmatch "${file}"`);
       return result.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a file exists in HEAD (was committed).
+   * A file can be in the index but not in HEAD (newly added).
+   */
+  private async existsInHead(file: string): Promise<boolean> {
+    try {
+      await this.git(`cat-file -e HEAD:"${file}"`);
+      return true;
     } catch {
       return false;
     }
@@ -86,16 +101,6 @@ export class ShelfManager {
     return stagedDiff || unstagedDiff;
   }
 
-  /**
-   * Revert tracked files to HEAD state — unstage + checkout.
-   */
-  private async revertToHead(files: string[]): Promise<void> {
-    if (files.length === 0) return;
-    const fileArgs = files.map(f => `"${f}"`).join(' ');
-    await this.git(`reset HEAD -- ${fileArgs}`);
-    await this.git(`checkout HEAD -- ${fileArgs}`);
-  }
-
   async shelve(files: string[], name: string, description?: string, type: 'changes' | 'staged' | 'silent' = 'changes'): Promise<boolean> {
     try {
       const shelfPath = path.join(this.shelfDir, this.sanitizeName(name));
@@ -104,37 +109,44 @@ export class ShelfManager {
       const meta: ShelfMeta = { name, timestamp: Date.now(), files, description, type };
       fs.writeFileSync(path.join(shelfPath, 'metadata.json'), JSON.stringify(meta, null, 2));
 
-      const trackedFiles: string[] = [];
-      const untrackedFiles: string[] = [];
+      // Categorize files:
+      // - committedModified: exists in HEAD, has changes → save diff, checkout HEAD
+      // - addedToIndex: in index but not in HEAD (new file staged) → save full content, unstage + delete
+      // - untracked: not in index at all → save full content, delete
+      const committedModified: string[] = [];
+      const addedToIndex: string[] = [];
+      const untracked: string[] = [];
 
       for (const file of files) {
-        if (await this.isTracked(file)) {
-          trackedFiles.push(file);
+        const inIndex = await this.isInIndex(file);
+        if (inIndex) {
+          const inHead = await this.existsInHead(file);
+          if (inHead) {
+            committedModified.push(file);
+          } else {
+            addedToIndex.push(file);
+          }
         } else {
-          untrackedFiles.push(file);
+          untracked.push(file);
         }
       }
 
-      // Save patches for tracked files
-      for (const file of trackedFiles) {
+      // Save diffs for committed-modified files
+      for (const file of committedModified) {
         const safeName = file.replace(/[\\/]/g, '__');
         let diff: string;
-
         if (type === 'staged') {
-          // Only shelving the staged portion
           diff = (await this.git(`diff --cached -- "${file}"`)).trim();
         } else {
-          // Shelving all changes from HEAD
           diff = await this.getEffectiveDiff(file);
         }
-
         if (diff) {
           fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
         }
       }
 
-      // Save full content for untracked files
-      for (const file of untrackedFiles) {
+      // Save full content for added-to-index files
+      for (const file of addedToIndex) {
         const safeName = file.replace(/[\\/]/g, '__');
         const fullPath = path.join(this.root, file);
         if (fs.existsSync(fullPath)) {
@@ -144,11 +156,38 @@ export class ShelfManager {
         }
       }
 
-      // Revert tracked files to HEAD (unstage + checkout)
-      await this.revertToHead(trackedFiles);
+      // Save full content for untracked files
+      for (const file of untracked) {
+        const safeName = file.replace(/[\\/]/g, '__');
+        const fullPath = path.join(this.root, file);
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath);
+          fs.writeFileSync(path.join(shelfPath, `${safeName}.full`), content);
+          fs.writeFileSync(path.join(shelfPath, `${safeName}.new`), file);
+        }
+      }
 
-      // Delete untracked files
-      for (const file of untrackedFiles) {
+      // Revert: committed-modified → reset + checkout HEAD
+      if (committedModified.length > 0) {
+        const fileArgs = committedModified.map(f => `"${f}"`).join(' ');
+        await this.git(`reset HEAD -- ${fileArgs}`);
+        await this.git(`checkout HEAD -- ${fileArgs}`);
+      }
+
+      // Revert: added-to-index → reset (unstage) + delete file
+      if (addedToIndex.length > 0) {
+        const fileArgs = addedToIndex.map(f => `"${f}"`).join(' ');
+        await this.git(`reset HEAD -- ${fileArgs}`);
+        for (const file of addedToIndex) {
+          const fullPath = path.join(this.root, file);
+          if (fs.existsSync(fullPath)) {
+            fs.unlinkSync(fullPath);
+          }
+        }
+      }
+
+      // Revert: untracked → delete file
+      for (const file of untracked) {
         const fullPath = path.join(this.root, file);
         if (fs.existsSync(fullPath)) {
           fs.unlinkSync(fullPath);
@@ -187,11 +226,13 @@ export class ShelfManager {
 
       const safeName = file.replace(/[\\/]/g, '__');
 
+      // Apply patch for tracked modified files
       const patchFile = path.join(shelfPath, `${safeName}.patch`);
       if (fs.existsSync(patchFile)) {
         await this.git(`apply "${patchFile}"`);
       }
 
+      // Restore new files (added-to-index or untracked)
       const newMarker = path.join(shelfPath, `${safeName}.new`);
       if (fs.existsSync(newMarker)) {
         const fullFile = path.join(shelfPath, `${safeName}.full`);
