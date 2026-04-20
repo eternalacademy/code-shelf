@@ -11,7 +11,8 @@ const TEST_DIR = path.join(__dirname, '..', 'test-workspace');
 const SHELF_DIR = path.join(TEST_DIR, '.vscode', 'shelf');
 
 async function git(args: string, cwd?: string): Promise<string> {
-  const { stdout } = await execAsync(`git ${args}`, { cwd: cwd || TEST_DIR });
+  const gitPath = process.platform === 'win32' ? '"C:\\Program Files\\Git\\cmd\\git.exe"' : 'git';
+  const { stdout } = await execAsync(`${gitPath} ${args}`, { cwd: cwd || TEST_DIR });
   return stdout;
 }
 
@@ -145,7 +146,7 @@ async function testSanitizeName(): Promise<void> {
   assert.strictEqual(sanitize('my shelf'), 'my_shelf');
   assert.strictEqual(sanitize('my-shelf'), 'my-shelf');
   assert.strictEqual(sanitize('my.shelf'), 'my_shelf');
-  assert.strictEqual(sanitize('shelf/../../etc'), 'shelf______etc');
+  assert.strictEqual(sanitize('shelf/../../etc'), 'shelf_______etc');
   
   console.log('    ✅ PASS');
 }
