@@ -205,10 +205,9 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // ─── View Diff ───
+  // ─── View Diff (proper diff editor) ───
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.viewShelfDiff', async (...args: any[]) => {
-      // Args can be: [shelfName, filePath] from tree command, or [ShelfTreeItem] from context menu
       let shelfName: string | undefined;
       let filePath: string | undefined;
 
@@ -225,18 +224,30 @@ export function activate(context: vscode.ExtensionContext) {
       const name = shelfName || await pickShelf();
       if (!name) return;
 
-      const diff = manager.getShelfDiff(name, filePath);
-      if (!diff) {
-        vscode.window.showInformationMessage('No diff content.');
-        return;
-      }
+      if (filePath) {
+        // Single file — show proper diff editor
+        const contents = await manager.getDiffContents(name, filePath);
+        if (!contents) {
+          vscode.window.showInformationMessage('No diff content.');
+          return;
+        }
 
-      const title = filePath ? `${name} — ${path.basename(filePath)}` : `${name} — diff`;
-      const doc = await vscode.workspace.openTextDocument({
-        content: diff,
-        language: 'diff'
-      });
-      await vscode.window.showTextDocument(doc, { preview: true });
+        const title = `${path.basename(filePath)} (${name})`;
+        const originalDoc = await vscode.workspace.openTextDocument({ content: contents.original, language: 'plaintext' });
+        const modifiedDoc = await vscode.workspace.openTextDocument({ content: contents.modified, language: 'plaintext' });
+        await vscode.commands.executeCommand('vscode.diff',
+          originalDoc.uri, modifiedDoc.uri, title
+        );
+      } else {
+        // Whole shelf — show combined patch view
+        const diff = manager.getShelfDiff(name);
+        if (!diff) {
+          vscode.window.showInformationMessage('No diff content.');
+          return;
+        }
+        const doc = await vscode.workspace.openTextDocument({ content: diff, language: 'diff' });
+        await vscode.window.showTextDocument(doc, { preview: true });
+      }
     })
   );
 

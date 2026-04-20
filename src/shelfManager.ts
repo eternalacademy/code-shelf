@@ -374,6 +374,69 @@ export class ShelfManager {
     return fs.existsSync(p) ? p : undefined;
   }
 
+  /**
+   * Get original (HEAD) and modified content for a shelved file, for use in vscode.diff.
+   * Returns { original, modified } or undefined.
+   */
+  async getDiffContents(shelfName: string, file: string): Promise<{ original: string; modified: string } | undefined> {
+    const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
+    if (!fs.existsSync(shelfPath)) return undefined;
+    const safeName = file.replace(/[\\/]/g, '__');
+
+    // New file (added-to-index or untracked)
+    const fullFile = path.join(shelfPath, `${safeName}.full`);
+    const newMarker = path.join(shelfPath, `${safeName}.new`);
+    if (fs.existsSync(fullFile) && fs.existsSync(newMarker)) {
+      return { original: '', modified: fs.readFileSync(fullFile, 'utf-8') };
+    }
+
+    // Deleted file
+    const headFile = path.join(shelfPath, `${safeName}.head`);
+    const deletedMarker = path.join(shelfPath, `${safeName}.deleted`);
+    if (fs.existsSync(headFile) && fs.existsSync(deletedMarker)) {
+      return { original: fs.readFileSync(headFile, 'utf-8'), modified: '' };
+    }
+
+    // Modified tracked file — apply patch to HEAD content
+    const patchFile = path.join(shelfPath, `${safeName}.patch`);
+    if (fs.existsSync(patchFile)) {
+      try {
+        const original = await this.git(`show HEAD:"${file}"`);
+        const patch = fs.readFileSync(patchFile, 'utf-8');
+        // Write original to temp, apply patch, read result
+        const tempDir = path.join(this.shelfDir, '__temp_diff__');
+        this.ensureDir(tempDir);
+        const tempOriginal = path.join(tempDir, safeName);
+        fs.writeFileSync(tempOriginal, original);
+        try {
+          await execAsync(`git apply --reverse "${patchFile}"`, { cwd: tempDir });
+          // Actually, let's do it differently: write original, apply patch forward
+        } catch { /* ignore */ }
+
+        // Simpler approach: write HEAD content to temp file, apply patch
+        const tempFile = path.join(tempDir, path.basename(file));
+        this.ensureDir(path.dirname(tempFile));
+        fs.writeFileSync(tempFile, original);
+        try {
+          await execAsync(`git apply "${patchFile}"`, { cwd: tempDir });
+          const modified = fs.readFileSync(tempFile, 'utf-8');
+          // Cleanup
+          fs.rmSync(tempDir, { recursive: true, force: true });
+          return { original, modified };
+        } catch {
+          // Patch apply failed in temp dir — fallback to showing raw patch
+          fs.rmSync(tempDir, { recursive: true, force: true });
+          return { original, modified: patch };
+        }
+      } catch {
+        // Can't get HEAD content (shouldn't happen for tracked)
+        return undefined;
+      }
+    }
+
+    return undefined;
+  }
+
   getShelfFilePath(shelfName: string, file: string): string | undefined {
     const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
     const safeName = file.replace(/[\\/]/g, '__');

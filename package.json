@@ -2,7 +2,7 @@
   "name": "code-shelf",
   "displayName": "Code Shelf",
   "description": "IntelliJ-style Shelve Changes for VS Code — selectively shelve and restore code changes without git stash",
-  "version": "1.3.3",
+  "version": "1.4.0",
   "publisher": "EternalAcademy",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -110,7 +110,8 @@
       {
         "command": "code-shelf.viewShelfDiff",
         "title": "View Shelf Diff",
-        "category": "Code Shelf"
+        "category": "Code Shelf",
+        "icon": "$(compare-changes)"
       },
       {
         "command": "code-shelf.refresh",
