@@ -27,9 +27,6 @@ export class ShelfManager {
     this.ensureDir(this.shelfDir);
 
     // Ensure shelf dir is gitignored
-    const gitignore = path.join(root, relPath.split('/')[0] || '.vscode', '.gitignore');
-    const shelfRelPath = relPath.split('/').pop() || 'shelf';
-    const parentGitignore = path.join(root, relPath);
     this.ensureGitignore(root, relPath);
   }
 
@@ -62,6 +59,21 @@ export class ShelfManager {
     return stdout;
   }
 
+  /**
+   * Check if a file is tracked by git.
+   * Uses git ls-files — returns true only if the file is tracked.
+   * Handles the case where git ls-files --error-unmatch exits non-zero for untracked files.
+   */
+  private async isTracked(file: string): Promise<boolean> {
+    try {
+      const result = await this.git(`ls-files --error-unmatch "${file}"`);
+      return result.trim().length > 0;
+    } catch {
+      // git ls-files --error-unmatch returns non-zero for untracked files
+      return false;
+    }
+  }
+
   async getModifiedFiles(): Promise<string[]> {
     const tracked = (await this.git('diff --name-only')).split('\n').filter(f => f.trim());
     const untracked = (await this.git('ls-files --others --exclude-standard')).split('\n').filter(f => f.trim());
@@ -77,45 +89,46 @@ export class ShelfManager {
       const meta: ShelfMeta = { name, timestamp: Date.now(), files, description };
       fs.writeFileSync(path.join(shelfPath, 'metadata.json'), JSON.stringify(meta, null, 2));
 
-      // Create patches for each tracked file
-      for (const file of files) {
-        const safeName = file.replace(/[\\/]/g, '__');
-        const isTracked = (await this.git(`ls-files --error-unmatch "${file}" 2>&1`)).trim().length > 0;
-        
-        if (isTracked) {
-          // Modified tracked file — save diff patch
-          const diff = await this.git(`diff -- "${file}"`);
-          if (diff.trim()) {
-            fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
-          }
-        } else {
-          // Untracked file — save full content
-          const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
-          const fullPath = path.join(root, file);
-          if (fs.existsSync(fullPath)) {
-            const content = fs.readFileSync(fullPath);
-            fs.writeFileSync(path.join(shelfPath, `${safeName}.full`), content);
-            // Mark as new file
-            fs.writeFileSync(path.join(shelfPath, `${safeName}.new`), file);
-          }
-        }
-      }
+      // Separate into tracked and untracked
+      const trackedFiles: string[] = [];
+      const untrackedFiles: string[] = [];
 
-      // Revert / delete the files
-      const trackedFiles = [];
-      const untrackedFiles = [];
       for (const file of files) {
-        const isTracked = (await this.git(`ls-files --error-unmatch "${file}" 2>&1`)).trim().length > 0;
-        if (isTracked) {
+        if (await this.isTracked(file)) {
           trackedFiles.push(file);
         } else {
           untrackedFiles.push(file);
         }
       }
 
+      // Save patches for tracked modified files
+      for (const file of trackedFiles) {
+        const safeName = file.replace(/[\\/]/g, '__');
+        const diff = await this.git(`diff -- "${file}"`);
+        if (diff.trim()) {
+          fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
+        }
+      }
+
+      // Save full content for untracked files
+      for (const file of untrackedFiles) {
+        const safeName = file.replace(/[\\/]/g, '__');
+        const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
+        const fullPath = path.join(root, file);
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath);
+          fs.writeFileSync(path.join(shelfPath, `${safeName}.full`), content);
+          // Mark as new file for unshelve
+          fs.writeFileSync(path.join(shelfPath, `${safeName}.new`), file);
+        }
+      }
+
+      // Revert tracked files
       if (trackedFiles.length > 0) {
         await this.git(`checkout -- ${trackedFiles.map(f => `"${f}"`).join(' ')}`);
       }
+
+      // Delete untracked files
       for (const file of untrackedFiles) {
         const root = vscode.workspace.workspaceFolders![0].uri.fsPath;
         const fullPath = path.join(root, file);
