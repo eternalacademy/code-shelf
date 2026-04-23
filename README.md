@@ -10,6 +10,14 @@ IntelliJ-style **Shelve Changes** for VS Code — a lightweight alternative to `
 
 **Code Shelf** stores patches in VS Code's workspace storage (hidden from file explorer and search) and lets you shelve/unshelve individual files or all changes with zero git side effects.
 
+---
+
+### ☕ Support This Project
+
+Hi, I'm **Umesh** — I build developer tools to make workflows simpler and more productive. If **Code Shelf** saves you time and you'd like to support continued development, consider [buying me a coffee](https://buymeacoffee.com/umeshsaini). Every cup helps! 🚀
+
+---
+
 ## Features
 
 - **Shelve Changes** — Pick specific files to shelve, name your shelf
