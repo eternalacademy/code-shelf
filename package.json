@@ -2,7 +2,7 @@
   "name": "code-shelf",
   "displayName": "Code Shelf",
   "description": "IntelliJ-style Shelve Changes for VS Code — selectively shelve and restore code changes without git stash",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "publisher": "EternalAcademy",
   "license": "MIT",
   "icon": "media/icon.png",
