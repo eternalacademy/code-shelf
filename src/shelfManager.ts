@@ -3,8 +3,30 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import {
+  atomicWriteFile,
+  atomicWriteJSON,
+  atomicReadFile,
+  atomicReadTextFile,
+  computeChecksum,
+  createManifest,
+  validateShelf,
+  formatValidationResult,
+  ShelfManifest,
+  ValidationResult,
+} from './integrity';
+import {
+  fileSafeName,
+  shelfDirName,
+  ensureDir,
+  safeRemoveDir,
+  safeReadFileBuffer,
+  OperationLock,
+} from './fileUtils';
 
 const execAsync = promisify(exec);
+
+const GIT_TIMEOUT_MS = 30_000;
 
 export interface ShelfMeta {
   name: string;
@@ -14,9 +36,18 @@ export interface ShelfMeta {
   type?: 'changes' | 'staged' | 'silent';
 }
 
+export interface UnshelveResult {
+  success: boolean;
+  restoredFiles: string[];
+  failedFiles: Array<{ file: string; error: string }>;
+  skippedFiles: string[];
+  integrityWarning?: string;
+}
+
 export class ShelfManager {
   private shelfDir: string;
   private root: string;
+  private lock = new OperationLock();
 
   constructor(context: vscode.ExtensionContext) {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -25,30 +56,24 @@ export class ShelfManager {
     }
     this.root = root;
 
-    // Use VS Code's workspace storage — completely hidden from file explorer and search
     const storageUri = context.storageUri;
     if (!storageUri) {
       throw new Error('Workspace storage not available');
     }
     const storageDir = path.join(storageUri.fsPath, 'code-shelf');
     this.shelfDir = storageDir;
-    this.ensureDir(this.shelfDir);
-  }
-
-  private ensureDir(dir: string): void {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
+    ensureDir(this.shelfDir);
   }
 
   private async git(args: string): Promise<string> {
-    const { stdout } = await execAsync(`git ${args}`, { cwd: this.root, maxBuffer: 50 * 1024 * 1024 });
+    const { stdout } = await execAsync(`git ${args}`, {
+      cwd: this.root,
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: GIT_TIMEOUT_MS,
+    });
     return stdout;
   }
 
-  /**
-   * Check if a file is in the git index (staged or tracked).
-   */
   private async isInIndex(file: string): Promise<boolean> {
     try {
       const result = await this.git(`ls-files --error-unmatch "${file}"`);
@@ -58,10 +83,6 @@ export class ShelfManager {
     }
   }
 
-  /**
-   * Check if a file exists in HEAD (was committed).
-   * A file can be in the index but not in HEAD (newly added).
-   */
   private async existsInHead(file: string): Promise<boolean> {
     try {
       await this.git(`cat-file -e HEAD:"${file}"`);
@@ -71,9 +92,6 @@ export class ShelfManager {
     }
   }
 
-  /**
-   * Get all modified files — includes unstaged, staged, and untracked.
-   */
   async getModifiedFiles(): Promise<string[]> {
     const tracked = (await this.git('diff --name-only')).split('\n').filter(f => f.trim());
     const staged = (await this.git('diff --cached --name-only')).split('\n').filter(f => f.trim());
@@ -85,9 +103,6 @@ export class ShelfManager {
     return (await this.git('diff --cached --name-only')).split('\n').filter(f => f.trim());
   }
 
-  /**
-   * Get the effective diff for a file from HEAD (includes both staged and unstaged changes).
-   */
   private async getEffectiveDiff(file: string): Promise<string> {
     let stagedDiff = '';
     try { stagedDiff = (await this.git(`diff --cached -- "${file}"`)).trim(); } catch { /* no staged changes */ }
@@ -101,18 +116,47 @@ export class ShelfManager {
     return stagedDiff || unstagedDiff;
   }
 
+  private resolveShelfPath(name: string): string {
+    return path.join(this.shelfDir, shelfDirName(name));
+  }
+
+  private findShelfPathByName(name: string): string | undefined {
+    const canonical = this.resolveShelfPath(name);
+    if (fs.existsSync(canonical)) {
+      return canonical;
+    }
+
+    if (!fs.existsSync(this.shelfDir)) {
+      return undefined;
+    }
+
+    for (const dir of fs.readdirSync(this.shelfDir)) {
+      const metaPath = path.join(this.shelfDir, dir, 'metadata.json');
+      if (fs.existsSync(metaPath)) {
+        try {
+          const meta: ShelfMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+          if (meta.name === name) {
+            return path.join(this.shelfDir, dir);
+          }
+        } catch {
+          // skip
+        }
+      }
+    }
+    return undefined;
+  }
+
   async shelve(files: string[], name: string, description?: string, type: 'changes' | 'staged' | 'silent' = 'changes'): Promise<boolean> {
+    const release = await this.lock.acquire();
     try {
-      const shelfPath = path.join(this.shelfDir, this.sanitizeName(name));
-      this.ensureDir(shelfPath);
+      const finalDir = this.resolveShelfPath(name);
+      if (fs.existsSync(finalDir)) {
+        throw new Error(`A shelf named "${name}" already exists. Please use a different name.`);
+      }
 
-      const meta: ShelfMeta = { name, timestamp: Date.now(), files, description, type };
-      fs.writeFileSync(path.join(shelfPath, 'metadata.json'), JSON.stringify(meta, null, 2));
+      const pendingDir = finalDir + '.pending.' + Date.now();
+      ensureDir(pendingDir);
 
-      // Categorize files:
-      // - committedModified: exists in HEAD, has changes → save diff, checkout HEAD
-      // - addedToIndex: in index but not in HEAD (new file staged) → save full content, unstage + delete
-      // - untracked: not in index at all → save full content, delete
       const committedModified: string[] = [];
       const addedToIndex: string[] = [];
       const untracked: string[] = [];
@@ -131,8 +175,6 @@ export class ShelfManager {
         }
       }
 
-      // Save patches for committed-modified files
-      // Split into: modified (file exists) vs deleted (file gone but in HEAD)
       const modifiedTracked: string[] = [];
       const deletedTracked: string[] = [];
       for (const file of committedModified) {
@@ -143,9 +185,10 @@ export class ShelfManager {
         }
       }
 
-      // Save diffs for modified files (file still exists)
+      const savedFiles: Record<string, Buffer | string> = {};
+
       for (const file of modifiedTracked) {
-        const safeName = file.replace(/[\\/]/g, '__');
+        const sn = fileSafeName(file);
         let diff: string;
         if (type === 'staged') {
           diff = (await this.git(`diff --cached -- "${file}"`)).trim();
@@ -153,167 +196,397 @@ export class ShelfManager {
           diff = await this.getEffectiveDiff(file);
         }
         if (diff) {
-          fs.writeFileSync(path.join(shelfPath, `${safeName}.patch`), diff);
+          const patchFileName = `${sn}.patch`;
+          atomicWriteFile(path.join(pendingDir, patchFileName), diff);
+          savedFiles[patchFileName] = diff;
         }
       }
 
-      // Save HEAD content for deleted files (can't use git apply for deletions reliably)
       for (const file of deletedTracked) {
-        const safeName = file.replace(/[\\/]/g, '__');
+        const sn = fileSafeName(file);
         const headContent = await this.git(`show HEAD:"${file}"`);
-        fs.writeFileSync(path.join(shelfPath, `${safeName}.head`), headContent);
-        fs.writeFileSync(path.join(shelfPath, `${safeName}.deleted`), file);
+        const headFileName = `${sn}.head`;
+        const markerFileName = `${sn}.deleted`;
+        atomicWriteFile(path.join(pendingDir, headFileName), headContent);
+        atomicWriteFile(path.join(pendingDir, markerFileName), file);
+        savedFiles[headFileName] = headContent;
+        savedFiles[markerFileName] = file;
       }
 
-      // Save full content for added-to-index files
-      for (const file of addedToIndex) {
-        const safeName = file.replace(/[\\/]/g, '__');
+      for (const file of [...addedToIndex, ...untracked]) {
+        const sn = fileSafeName(file);
         const fullPath = path.join(this.root, file);
         if (fs.existsSync(fullPath)) {
-          const content = fs.readFileSync(fullPath);
-          fs.writeFileSync(path.join(shelfPath, `${safeName}.full`), content);
-          fs.writeFileSync(path.join(shelfPath, `${safeName}.new`), file);
+          const content = safeReadFileBuffer(fullPath);
+          const fullFileName = `${sn}.full`;
+          const markerFileName = `${sn}.new`;
+          atomicWriteFile(path.join(pendingDir, fullFileName), content);
+          atomicWriteFile(path.join(pendingDir, markerFileName), file);
+          savedFiles[fullFileName] = content;
+          savedFiles[markerFileName] = file;
         }
       }
 
-      // Save full content for untracked files
-      for (const file of untracked) {
-        const safeName = file.replace(/[\\/]/g, '__');
-        const fullPath = path.join(this.root, file);
-        if (fs.existsSync(fullPath)) {
-          const content = fs.readFileSync(fullPath);
-          fs.writeFileSync(path.join(shelfPath, `${safeName}.full`), content);
-          fs.writeFileSync(path.join(shelfPath, `${safeName}.new`), file);
+      const manifest = createManifest(savedFiles);
+      atomicWriteJSON(path.join(pendingDir, 'manifest.json'), manifest);
+
+      const postManifest = JSON.parse(fs.readFileSync(path.join(pendingDir, 'manifest.json'), 'utf-8')) as ShelfManifest;
+      const validation = validateShelf(pendingDir, postManifest);
+      if (!validation.valid) {
+        safeRemoveDir(pendingDir);
+        throw new Error(`Integrity check failed after saving shelf. No data was lost.\n${formatValidationResult(validation)}`);
+      }
+
+      const meta: ShelfMeta = { name, timestamp: Date.now(), files, description, type };
+      atomicWriteJSON(path.join(pendingDir, 'metadata.json'), meta);
+
+      try {
+        fs.renameSync(pendingDir, finalDir);
+      } catch (renameErr) {
+        if (!fs.existsSync(finalDir)) {
+          try {
+            fs.cpSync(pendingDir, finalDir, { recursive: true });
+            safeRemoveDir(pendingDir);
+          } catch (cpErr) {
+            safeRemoveDir(pendingDir);
+            throw new Error(`Failed to finalize shelf: ${(renameErr as Error).message}. Your working tree was not modified.`);
+          }
         }
       }
 
-      // Revert: modified tracked → reset + checkout HEAD
-      if (modifiedTracked.length > 0) {
+      await this.revertWorkingTree(modifiedTracked, deletedTracked, addedToIndex, untracked);
+
+      return true;
+    } catch (error) {
+      const msg = (error as Error).message;
+      vscode.window.showErrorMessage(`Failed to shelve: ${msg}`);
+      return false;
+    } finally {
+      release();
+    }
+  }
+
+  private async revertWorkingTree(
+    modifiedTracked: string[],
+    deletedTracked: string[],
+    addedToIndex: string[],
+    untracked: string[],
+  ): Promise<void> {
+    const revertErrors: string[] = [];
+
+    if (modifiedTracked.length > 0) {
+      try {
         const fileArgs = modifiedTracked.map(f => `"${f}"`).join(' ');
         await this.git(`reset HEAD -- ${fileArgs}`);
         await this.git(`checkout HEAD -- ${fileArgs}`);
+      } catch (err) {
+        revertErrors.push(`Modified files revert failed: ${(err as Error).message}`);
       }
+    }
 
-      // Revert: deleted tracked → restore from HEAD (already reverted, but reset staging if needed)
-      if (deletedTracked.length > 0) {
+    if (deletedTracked.length > 0) {
+      try {
         const fileArgs = deletedTracked.map(f => `"${f}"`).join(' ');
         await this.git(`reset HEAD -- ${fileArgs}`);
         await this.git(`checkout HEAD -- ${fileArgs}`);
+      } catch (err) {
+        revertErrors.push(`Deleted files revert failed: ${(err as Error).message}`);
       }
+    }
 
-      // Revert: added-to-index → reset (unstage) + delete file
-      if (addedToIndex.length > 0) {
+    if (addedToIndex.length > 0) {
+      try {
         const fileArgs = addedToIndex.map(f => `"${f}"`).join(' ');
         await this.git(`reset HEAD -- ${fileArgs}`);
-        for (const file of addedToIndex) {
+      } catch (err) {
+        revertErrors.push(`Added-to-index reset failed: ${(err as Error).message}`);
+      }
+      for (const file of addedToIndex) {
+        try {
           const fullPath = path.join(this.root, file);
           if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
           }
+        } catch (err) {
+          revertErrors.push(`Failed to delete added file ${file}: ${(err as Error).message}`);
         }
       }
+    }
 
-      // Revert: untracked → delete file
-      for (const file of untracked) {
+    for (const file of untracked) {
+      try {
         const fullPath = path.join(this.root, file);
         if (fs.existsSync(fullPath)) {
           fs.unlinkSync(fullPath);
         }
+      } catch (err) {
+        revertErrors.push(`Failed to delete untracked file ${file}: ${(err as Error).message}`);
       }
+    }
 
-      return true;
-    } catch (error) {
-      vscode.window.showErrorMessage(`Failed to shelve: ${(error as Error).message}`);
-      return false;
+    if (revertErrors.length > 0) {
+      vscode.window.showWarningMessage(
+        `Shelf saved successfully, but some files could not be reverted:\n${revertErrors.join('\n')}\n\nYour changes are safely stored in the shelf.`
+      );
+    }
+  }
+
+  private validateShelfIntegrity(shelfPath: string): { valid: boolean; warning?: string; manifest?: ShelfManifest } {
+    const manifestPath = path.join(shelfPath, 'manifest.json');
+    const metaPath = path.join(shelfPath, 'metadata.json');
+
+    if (!fs.existsSync(metaPath)) {
+      return { valid: false, warning: 'Shelf metadata is missing. The shelf may be corrupted.' };
+    }
+
+    try {
+      JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+    } catch {
+      return { valid: false, warning: 'Shelf metadata is corrupted (invalid JSON).' };
+    }
+
+    if (!fs.existsSync(manifestPath)) {
+      return {
+        valid: true,
+        warning: 'This shelf was created with an older version and has no integrity manifest. Files will be restored but cannot be verified.',
+      };
+    }
+
+    try {
+      const manifest: ShelfManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      const result = validateShelf(shelfPath, manifest);
+      if (!result.valid) {
+        return {
+          valid: false,
+          warning: `Integrity check failed:\n${formatValidationResult(result)}`,
+          manifest,
+        };
+      }
+      return { valid: true, manifest };
+    } catch {
+      return { valid: false, warning: 'Shelf manifest is corrupted (invalid JSON).' };
+    }
+  }
+
+  async isFileDirty(file: string): Promise<boolean> {
+    try {
+      const inIndex = await this.isInIndex(file);
+      if (!inIndex) {
+        return fs.existsSync(path.join(this.root, file));
+      }
+      const diff = await this.git(`diff HEAD -- "${file}"`);
+      return diff.trim().length > 0;
+    } catch {
+      return fs.existsSync(path.join(this.root, file));
     }
   }
 
   async unshelve(name: string): Promise<boolean> {
+    const release = await this.lock.acquire();
     try {
-      const shelfPath = path.join(this.shelfDir, this.sanitizeName(name));
-      if (!fs.existsSync(shelfPath)) throw new Error(`Shelf "${name}" not found`);
-
-      const meta: ShelfMeta = JSON.parse(fs.readFileSync(path.join(shelfPath, 'metadata.json'), 'utf-8'));
-
-      for (const file of meta.files) {
-        await this.unshelveFile(name, file);
+      const result = await this.unshelveInternal(name);
+      if (!result.success) {
+        const details: string[] = [];
+        if (result.failedFiles.length > 0) {
+          details.push(`Failed: ${result.failedFiles.map(f => `${f.file} (${f.error})`).join(', ')}`);
+        }
+        if (result.integrityWarning) {
+          details.push(result.integrityWarning);
+        }
+        vscode.window.showErrorMessage(`Unshelve completed with issues:\n${details.join('\n')}`);
+        return result.restoredFiles.length > 0;
       }
-
       return true;
-    } catch (error) {
-      vscode.window.showErrorMessage(`Failed to unshelve: ${(error as Error).message}`);
-      return false;
+    } finally {
+      release();
     }
+  }
+
+  private async unshelveInternal(name: string): Promise<UnshelveResult> {
+    const result: UnshelveResult = {
+      success: true,
+      restoredFiles: [],
+      failedFiles: [],
+      skippedFiles: [],
+    };
+
+    const shelfPath = this.findShelfPathByName(name);
+    if (!shelfPath) {
+      result.success = false;
+      result.failedFiles.push({ file: '(shelf)', error: `Shelf "${name}" not found` });
+      return result;
+    }
+
+    const integrity = this.validateShelfIntegrity(shelfPath);
+    if (!integrity.valid) {
+      result.success = false;
+      result.integrityWarning = integrity.warning;
+      return result;
+    }
+    if (integrity.warning) {
+      result.integrityWarning = integrity.warning;
+    }
+
+    let meta: ShelfMeta;
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(shelfPath, 'metadata.json'), 'utf-8'));
+    } catch {
+      result.success = false;
+      result.failedFiles.push({ file: '(metadata)', error: 'Corrupted metadata' });
+      return result;
+    }
+
+    const dirtyFiles: string[] = [];
+    for (const file of meta.files) {
+      try {
+        if (await this.isFileDirty(file)) {
+          dirtyFiles.push(file);
+        }
+      } catch {
+        // If we can't check, be cautious and include it
+        dirtyFiles.push(file);
+      }
+    }
+
+    if (dirtyFiles.length > 0) {
+      const proceed = await vscode.window.showWarningMessage(
+        `The following files have local changes that will be overwritten:\n\n${dirtyFiles.join('\n')}\n\nProceed with unshelve?`,
+        { modal: true },
+        'Overwrite',
+        'Cancel'
+      );
+      if (proceed !== 'Overwrite') {
+        result.skippedFiles = meta.files;
+        result.success = false;
+        return result;
+      }
+    }
+
+    for (const file of meta.files) {
+      try {
+        const restored = await this.unshelveSingleFile(shelfPath, name, file);
+        if (restored) {
+          result.restoredFiles.push(file);
+        } else {
+          result.skippedFiles.push(file);
+        }
+      } catch (err) {
+        result.failedFiles.push({ file, error: (err as Error).message });
+        result.success = false;
+      }
+    }
+
+    return result;
   }
 
   async unshelveFile(shelfName: string, file: string): Promise<boolean> {
+    const release = await this.lock.acquire();
     try {
-      const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
-      if (!fs.existsSync(shelfPath)) throw new Error(`Shelf "${shelfName}" not found`);
-
-      const safeName = file.replace(/[\\/]/g, '__');
-
-      // Restore new files (added-to-index or untracked)
-      const newMarker = path.join(shelfPath, `${safeName}.new`);
-      if (fs.existsSync(newMarker)) {
-        const fullFile = path.join(shelfPath, `${safeName}.full`);
-        if (fs.existsSync(fullFile)) {
-          const targetPath = path.join(this.root, file);
-          this.ensureDir(path.dirname(targetPath));
-          fs.copyFileSync(fullFile, targetPath);
-        }
-        return true;
+      const shelfPath = this.findShelfPathByName(shelfName);
+      if (!shelfPath) {
+        vscode.window.showErrorMessage(`Shelf "${shelfName}" not found`);
+        return false;
       }
 
-      // Restore deleted files — just delete the file from disk
-      const deletedMarker = path.join(shelfPath, `${safeName}.deleted`);
-      if (fs.existsSync(deletedMarker)) {
-        const fullPath = path.join(this.root, file);
-        if (fs.existsSync(fullPath)) {
-          fs.unlinkSync(fullPath);
-        }
-        return true;
+      const integrity = this.validateShelfIntegrity(shelfPath);
+      if (!integrity.valid) {
+        vscode.window.showErrorMessage(`Cannot unshelve — integrity check failed:\n${integrity.warning}`);
+        return false;
       }
 
-      // Apply patch for tracked modified files
-      const patchFile = path.join(shelfPath, `${safeName}.patch`);
-      if (fs.existsSync(patchFile)) {
-        const fullPath = path.join(this.root, file);
-        if (!fs.existsSync(fullPath)) {
-          try {
-            await this.git(`checkout HEAD -- "${file}"`);
-          } catch {
-            this.ensureDir(path.dirname(fullPath));
-            fs.writeFileSync(fullPath, '');
+      try {
+        if (await this.isFileDirty(file)) {
+          const proceed = await vscode.window.showWarningMessage(
+            `"${file}" has local changes that will be overwritten. Proceed?`,
+            { modal: true },
+            'Overwrite',
+            'Cancel'
+          );
+          if (proceed !== 'Overwrite') {
+            return false;
           }
         }
-        await this.git(`apply "${patchFile}"`);
+      } catch {
+        // If we can't check, proceed anyway
       }
 
-      return true;
+      return await this.unshelveSingleFile(shelfPath, shelfName, file);
     } catch (error) {
       vscode.window.showErrorMessage(`Failed to unshelve file: ${(error as Error).message}`);
       return false;
+    } finally {
+      release();
     }
   }
 
+  private async unshelveSingleFile(shelfPath: string, shelfName: string, file: string): Promise<boolean> {
+    const sn = fileSafeName(file);
+
+    const newMarker = path.join(shelfPath, `${sn}.new`);
+    if (fs.existsSync(newMarker)) {
+      const fullFile = path.join(shelfPath, `${sn}.full`);
+      if (fs.existsSync(fullFile)) {
+        const content = safeReadFileBuffer(fullFile);
+        const targetPath = path.join(this.root, file);
+        ensureDir(path.dirname(targetPath));
+        atomicWriteFile(targetPath, content);
+      }
+      return true;
+    }
+
+    const deletedMarker = path.join(shelfPath, `${sn}.deleted`);
+    if (fs.existsSync(deletedMarker)) {
+      const fullPath = path.join(this.root, file);
+      if (fs.existsSync(fullPath)) {
+        fs.unlinkSync(fullPath);
+      }
+      return true;
+    }
+
+    const patchFile = path.join(shelfPath, `${sn}.patch`);
+    if (fs.existsSync(patchFile)) {
+      const fullPath = path.join(this.root, file);
+      if (!fs.existsSync(fullPath)) {
+        try {
+          await this.git(`checkout HEAD -- "${file}"`);
+        } catch {
+          ensureDir(path.dirname(fullPath));
+          atomicWriteFile(fullPath, '');
+        }
+      }
+      await this.git(`apply --3way "${patchFile}"`);
+      return true;
+    }
+
+    return false;
+  }
+
   async renameShelf(oldName: string, newName: string): Promise<boolean> {
+    const release = await this.lock.acquire();
     try {
-      const oldPath = path.join(this.shelfDir, this.sanitizeName(oldName));
-      const newPath = path.join(this.shelfDir, this.sanitizeName(newName));
-      if (!fs.existsSync(oldPath)) throw new Error(`Shelf "${oldName}" not found`);
+      const oldPath = this.findShelfPathByName(oldName);
+      if (!oldPath) throw new Error(`Shelf "${oldName}" not found`);
+
+      const newPath = this.resolveShelfPath(newName);
       if (fs.existsSync(newPath)) throw new Error(`Shelf "${newName}" already exists`);
 
       const metaPath = path.join(oldPath, 'metadata.json');
       const meta: ShelfMeta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       meta.name = newName;
-      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+      atomicWriteJSON(metaPath, meta);
+
+      const manifestPath = path.join(oldPath, 'manifest.json');
+      if (fs.existsSync(manifestPath)) {
+        fs.unlinkSync(manifestPath);
+      }
 
       fs.renameSync(oldPath, newPath);
       return true;
     } catch (error) {
       vscode.window.showErrorMessage(`Failed to rename: ${(error as Error).message}`);
       return false;
+    } finally {
+      release();
     }
   }
 
@@ -322,12 +595,16 @@ export class ShelfManager {
 
     const shelves: ShelfMeta[] = [];
     for (const name of fs.readdirSync(this.shelfDir)) {
-      const metaPath = path.join(this.shelfDir, name, 'metadata.json');
+      const dirPath = path.join(this.shelfDir, name);
+      if (!fs.statSync(dirPath).isDirectory()) continue;
+      if (name.endsWith('.pending') || name.includes('.pending.')) continue;
+
+      const metaPath = path.join(dirPath, 'metadata.json');
       if (fs.existsSync(metaPath)) {
         try {
           shelves.push(JSON.parse(fs.readFileSync(metaPath, 'utf-8')));
         } catch {
-          // Skip corrupted metadata
+          // skip corrupted
         }
       }
     }
@@ -335,101 +612,107 @@ export class ShelfManager {
   }
 
   async deleteShelf(name: string): Promise<boolean> {
-    const shelfPath = path.join(this.shelfDir, this.sanitizeName(name));
-    if (fs.existsSync(shelfPath)) {
-      fs.rmSync(shelfPath, { recursive: true, force: true });
-      return true;
+    const release = await this.lock.acquire();
+    try {
+      const shelfPath = this.findShelfPathByName(name);
+      if (shelfPath && fs.existsSync(shelfPath)) {
+        safeRemoveDir(shelfPath);
+        return true;
+      }
+      return false;
+    } finally {
+      release();
     }
-    return false;
   }
 
   getShelfDiff(shelfName: string, file?: string): string {
-    const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
-    if (!fs.existsSync(shelfPath)) return '';
+    const shelfPath = this.findShelfPathByName(shelfName);
+    if (!shelfPath || !fs.existsSync(shelfPath)) return '';
 
     if (file) {
-      const safeName = file.replace(/[\\/]/g, '__');
-      const patchFile = path.join(shelfPath, `${safeName}.patch`);
-      if (fs.existsSync(patchFile)) return fs.readFileSync(patchFile, 'utf-8');
-      const fullFile = path.join(shelfPath, `${safeName}.full`);
-      if (fs.existsSync(fullFile)) return `--- /dev/null\n+++ b/${file}\n${fs.readFileSync(fullFile, 'utf-8')}`;
-      const deletedFile = path.join(shelfPath, `${safeName}.head`);
-      if (fs.existsSync(deletedFile)) return `--- a/${file}\n+++ /dev/null\n${fs.readFileSync(deletedFile, 'utf-8').split('\n').map(l => '-' + l).join('\n')}`;
+      const sn = fileSafeName(file);
+      const patchFile = path.join(shelfPath, `${sn}.patch`);
+      if (fs.existsSync(patchFile)) {
+        try { return fs.readFileSync(patchFile, 'utf-8'); } catch { return ''; }
+      }
+      const fullFile = path.join(shelfPath, `${sn}.full`);
+      if (fs.existsSync(fullFile)) {
+        try {
+          return `--- /dev/null\n+++ b/${file}\n${fs.readFileSync(fullFile, 'utf-8')}`;
+        } catch { return ''; }
+      }
+      const headFile = path.join(shelfPath, `${sn}.head`);
+      if (fs.existsSync(headFile)) {
+        try {
+          return `--- a/${file}\n+++ /dev/null\n${fs.readFileSync(headFile, 'utf-8').split('\n').map(l => '-' + l).join('\n')}`;
+        } catch { return ''; }
+      }
       return '';
     }
 
     let combined = '';
-    for (const f of fs.readdirSync(shelfPath)) {
-      if (f.endsWith('.patch')) {
-        combined += fs.readFileSync(path.join(shelfPath, f), 'utf-8') + '\n';
+    try {
+      for (const f of fs.readdirSync(shelfPath)) {
+        if (f.endsWith('.patch')) {
+          try {
+            combined += fs.readFileSync(path.join(shelfPath, f), 'utf-8') + '\n';
+          } catch { /* skip unreadable */ }
+        }
       }
-    }
+    } catch { /* shelf dir read error */ }
     return combined;
   }
 
   getPatchPath(shelfName: string, file: string): string | undefined {
-    const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
-    const safeName = file.replace(/[\\/]/g, '__');
-    const p = path.join(shelfPath, `${safeName}.patch`);
+    const shelfPath = this.findShelfPathByName(shelfName);
+    if (!shelfPath) return undefined;
+    const sn = fileSafeName(file);
+    const p = path.join(shelfPath, `${sn}.patch`);
     return fs.existsSync(p) ? p : undefined;
   }
 
-  /**
-   * Get original (HEAD) and modified content for a shelved file, for use in vscode.diff.
-   * Returns { original, modified } or undefined.
-   */
   async getDiffContents(shelfName: string, file: string): Promise<{ original: string; modified: string } | undefined> {
-    const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
-    if (!fs.existsSync(shelfPath)) return undefined;
-    const safeName = file.replace(/[\\/]/g, '__');
+    const shelfPath = this.findShelfPathByName(shelfName);
+    if (!shelfPath || !fs.existsSync(shelfPath)) return undefined;
+    const sn = fileSafeName(file);
 
-    // New file (added-to-index or untracked)
-    const fullFile = path.join(shelfPath, `${safeName}.full`);
-    const newMarker = path.join(shelfPath, `${safeName}.new`);
+    const fullFile = path.join(shelfPath, `${sn}.full`);
+    const newMarker = path.join(shelfPath, `${sn}.new`);
     if (fs.existsSync(fullFile) && fs.existsSync(newMarker)) {
-      return { original: '', modified: fs.readFileSync(fullFile, 'utf-8') };
+      try {
+        return { original: '', modified: fs.readFileSync(fullFile, 'utf-8') };
+      } catch { return undefined; }
     }
 
-    // Deleted file
-    const headFile = path.join(shelfPath, `${safeName}.head`);
-    const deletedMarker = path.join(shelfPath, `${safeName}.deleted`);
+    const headFile = path.join(shelfPath, `${sn}.head`);
+    const deletedMarker = path.join(shelfPath, `${sn}.deleted`);
     if (fs.existsSync(headFile) && fs.existsSync(deletedMarker)) {
-      return { original: fs.readFileSync(headFile, 'utf-8'), modified: '' };
+      try {
+        return { original: fs.readFileSync(headFile, 'utf-8'), modified: '' };
+      } catch { return undefined; }
     }
 
-    // Modified tracked file — apply patch to HEAD content
-    const patchFile = path.join(shelfPath, `${safeName}.patch`);
+    const patchFile = path.join(shelfPath, `${sn}.patch`);
     if (fs.existsSync(patchFile)) {
       try {
         const original = await this.git(`show HEAD:"${file}"`);
         const patch = fs.readFileSync(patchFile, 'utf-8');
-        // Write original to temp, apply patch, read result
-        const tempDir = path.join(this.shelfDir, '__temp_diff__');
-        this.ensureDir(tempDir);
-        const tempOriginal = path.join(tempDir, safeName);
-        fs.writeFileSync(tempOriginal, original);
-        try {
-          await execAsync(`git apply --reverse "${patchFile}"`, { cwd: tempDir });
-          // Actually, let's do it differently: write original, apply patch forward
-        } catch { /* ignore */ }
+        const uniqueId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const tempDir = path.join(this.shelfDir, `__diff_${uniqueId}__`);
+        ensureDir(tempDir);
 
-        // Simpler approach: write HEAD content to temp file, apply patch
-        const tempFile = path.join(tempDir, path.basename(file));
-        this.ensureDir(path.dirname(tempFile));
-        fs.writeFileSync(tempFile, original);
         try {
-          await execAsync(`git apply "${patchFile}"`, { cwd: tempDir });
+          const tempFile = path.join(tempDir, path.basename(file));
+          fs.writeFileSync(tempFile, original);
+          await execAsync(`git apply "${patchFile}"`, { cwd: tempDir, timeout: GIT_TIMEOUT_MS });
           const modified = fs.readFileSync(tempFile, 'utf-8');
-          // Cleanup
-          fs.rmSync(tempDir, { recursive: true, force: true });
           return { original, modified };
         } catch {
-          // Patch apply failed in temp dir — fallback to showing raw patch
-          fs.rmSync(tempDir, { recursive: true, force: true });
           return { original, modified: patch };
+        } finally {
+          safeRemoveDir(tempDir);
         }
       } catch {
-        // Can't get HEAD content (shouldn't happen for tracked)
         return undefined;
       }
     }
@@ -438,13 +721,58 @@ export class ShelfManager {
   }
 
   getShelfFilePath(shelfName: string, file: string): string | undefined {
-    const shelfPath = path.join(this.shelfDir, this.sanitizeName(shelfName));
-    const safeName = file.replace(/[\\/]/g, '__');
-    const full = path.join(shelfPath, `${safeName}.full`);
+    const shelfPath = this.findShelfPathByName(shelfName);
+    if (!shelfPath) return undefined;
+    const sn = fileSafeName(file);
+    const full = path.join(shelfPath, `${sn}.full`);
     return fs.existsSync(full) ? full : undefined;
   }
 
-  private sanitizeName(name: string): string {
-    return name.replace(/[^a-zA-Z0-9_\-]/g, '_');
+  async validateShelfByName(name: string): Promise<ValidationResult | null> {
+    const shelfPath = this.findShelfPathByName(name);
+    if (!shelfPath) return null;
+
+    const manifestPath = path.join(shelfPath, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      return {
+        valid: false,
+        missingFiles: [],
+        corruptedFiles: [],
+        extraFiles: [],
+      };
+    }
+
+    try {
+      const manifest: ShelfManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+      return validateShelf(shelfPath, manifest);
+    } catch {
+      return {
+        valid: false,
+        missingFiles: [],
+        corruptedFiles: [],
+        extraFiles: [],
+      };
+    }
+  }
+
+  async repairPendingShelves(): Promise<string[]> {
+    const repaired: string[] = [];
+    if (!fs.existsSync(this.shelfDir)) return repaired;
+
+    for (const name of fs.readdirSync(this.shelfDir)) {
+      const dirPath = path.join(this.shelfDir, name);
+      if (!fs.statSync(dirPath).isDirectory()) continue;
+
+      if (name.includes('.pending.')) {
+        safeRemoveDir(dirPath);
+        repaired.push(`Cleaned up pending directory: ${name}`);
+      }
+    }
+
+    return repaired;
+  }
+
+  async getShelfStoragePath(): Promise<string> {
+    return this.shelfDir;
   }
 }

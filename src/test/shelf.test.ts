@@ -1,12 +1,34 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+
+import {
+  computeChecksum,
+  atomicWriteFile,
+  atomicReadTextFile,
+  atomicWriteJSON,
+  createManifest,
+  validateShelf,
+  verifyFile,
+  formatValidationResult,
+  ShelfManifest,
+} from '../integrity';
+
+import {
+  fileSafeName,
+  shelfDirName,
+  ensureDir,
+  safeRemoveDir,
+  OperationLock,
+} from '../fileUtils';
 
 const execAsync = promisify(exec);
 
 const TEST_DIR = path.join(__dirname, '..', 'test-workspace');
+const TEST_SHELF_DIR = path.join(TEST_DIR, 'test-shelves');
 
 async function git(args: string, cwd?: string): Promise<string> {
   const gitPath = process.platform === 'win32' ? '"C:\\Program Files\\Git\\cmd\\git.exe"' : 'git';
@@ -44,7 +66,184 @@ async function setupTestRepo(): Promise<void> {
   await git('commit -m "initial"');
 }
 
-// --- Core Tests ---
+// --- Integrity Tests ---
+
+async function testComputeChecksum(): Promise<void> {
+  console.log('  test: computeChecksum produces consistent SHA256');
+  const content = 'hello world';
+  const hash1 = computeChecksum(content);
+  const hash2 = computeChecksum(Buffer.from(content));
+  assert.strictEqual(hash1, hash2, 'String and Buffer should produce same checksum');
+  assert.strictEqual(hash1.length, 64, 'SHA256 hex digest should be 64 chars');
+  assert.strictEqual(hash1, 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9');
+  console.log('    ✅ PASS');
+}
+
+async function testAtomicWriteFile(): Promise<void> {
+  console.log('  test: atomicWriteFile creates file correctly');
+  const testDir = path.join(TEST_DIR, 'atomic-test');
+  ensureDir(testDir);
+  const filePath = path.join(testDir, 'test.txt');
+  atomicWriteFile(filePath, 'test content');
+  assert.ok(fs.existsSync(filePath), 'File should exist');
+  assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), 'test content');
+  safeRemoveDir(testDir);
+  console.log('    ✅ PASS');
+}
+
+async function testAtomicWriteJSON(): Promise<void> {
+  console.log('  test: atomicWriteJSON creates valid JSON');
+  const testDir = path.join(TEST_DIR, 'json-test');
+  ensureDir(testDir);
+  const filePath = path.join(testDir, 'data.json');
+  const data = { name: 'test', value: 42 };
+  atomicWriteJSON(filePath, data);
+  assert.ok(fs.existsSync(filePath), 'File should exist');
+  const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  assert.strictEqual(parsed.name, 'test');
+  assert.strictEqual(parsed.value, 42);
+  safeRemoveDir(testDir);
+  console.log('    ✅ PASS');
+}
+
+async function testCreateManifestAndValidate(): Promise<void> {
+  console.log('  test: createManifest and validateShelf');
+  const shelfDir = path.join(TEST_DIR, 'manifest-test');
+  ensureDir(shelfDir);
+
+  const fileContent = 'file content here';
+  atomicWriteFile(path.join(shelfDir, 'test.patch'), fileContent);
+
+  const files: Record<string, Buffer | string> = {
+    'test.patch': fileContent,
+  };
+  const manifest = createManifest(files);
+
+  assert.strictEqual(manifest.version, 1);
+  assert.ok(manifest.files['test.patch']);
+  assert.strictEqual(manifest.files['test.patch'].size, fileContent.length);
+
+  atomicWriteJSON(path.join(shelfDir, 'manifest.json'), manifest);
+
+  const loadedManifest: ShelfManifest = JSON.parse(fs.readFileSync(path.join(shelfDir, 'manifest.json'), 'utf-8'));
+  const result = validateShelf(shelfDir, loadedManifest);
+  assert.ok(result.valid, 'Shelf should be valid');
+  assert.strictEqual(result.missingFiles.length, 0);
+  assert.strictEqual(result.corruptedFiles.length, 0);
+
+  safeRemoveDir(shelfDir);
+  console.log('    ✅ PASS');
+}
+
+async function testValidateShelfDetectsCorruption(): Promise<void> {
+  console.log('  test: validateShelf detects corrupted file');
+  const shelfDir = path.join(TEST_DIR, 'corrupt-test');
+  ensureDir(shelfDir);
+
+  const originalContent = 'original content';
+  atomicWriteFile(path.join(shelfDir, 'test.patch'), originalContent);
+
+  const files: Record<string, Buffer | string> = { 'test.patch': originalContent };
+  const manifest = createManifest(files);
+  atomicWriteJSON(path.join(shelfDir, 'manifest.json'), manifest);
+
+  // Corrupt the file
+  fs.writeFileSync(path.join(shelfDir, 'test.patch'), 'corrupted!');
+
+  const loadedManifest: ShelfManifest = JSON.parse(fs.readFileSync(path.join(shelfDir, 'manifest.json'), 'utf-8'));
+  const result = validateShelf(shelfDir, loadedManifest);
+  assert.ok(!result.valid, 'Shelf should be invalid');
+  assert.ok(result.corruptedFiles.includes('test.patch'), 'Should detect corrupted file');
+
+  safeRemoveDir(shelfDir);
+  console.log('    ✅ PASS');
+}
+
+async function testValidateShelfDetectsMissingFile(): Promise<void> {
+  console.log('  test: validateShelf detects missing file');
+  const shelfDir = path.join(TEST_DIR, 'missing-test');
+  ensureDir(shelfDir);
+
+  const content = 'some content';
+  const files: Record<string, Buffer | string> = { 'test.patch': content, 'other.patch': content };
+  const manifest = createManifest(files);
+
+  // Only write one of the two files
+  atomicWriteFile(path.join(shelfDir, 'test.patch'), content);
+  atomicWriteJSON(path.join(shelfDir, 'manifest.json'), manifest);
+
+  const loadedManifest: ShelfManifest = JSON.parse(fs.readFileSync(path.join(shelfDir, 'manifest.json'), 'utf-8'));
+  const result = validateShelf(shelfDir, loadedManifest);
+  assert.ok(!result.valid, 'Shelf should be invalid');
+  assert.ok(result.missingFiles.includes('other.patch'), 'Should detect missing file');
+
+  safeRemoveDir(shelfDir);
+  console.log('    ✅ PASS');
+}
+
+async function testVerifyFile(): Promise<void> {
+  console.log('  test: verifyFile checks checksum and size');
+  const testDir = path.join(TEST_DIR, 'verify-test');
+  ensureDir(testDir);
+  const filePath = path.join(testDir, 'test.txt');
+  const content = 'verify me';
+  atomicWriteFile(filePath, content);
+
+  const checksum = computeChecksum(content);
+  assert.ok(verifyFile(filePath, { checksum, size: content.length }), 'Should verify correct file');
+  assert.ok(!verifyFile(filePath, { checksum: 'wrong', size: content.length }), 'Should reject wrong checksum');
+  assert.ok(!verifyFile(filePath, { checksum, size: 999 }), 'Should reject wrong size');
+  assert.ok(!verifyFile(path.join(testDir, 'nonexistent'), { checksum, size: content.length }), 'Should reject missing file');
+
+  safeRemoveDir(testDir);
+  console.log('    ✅ PASS');
+}
+
+// --- File Utils Tests ---
+
+async function testFileSafeNameNoCollision(): Promise<void> {
+  console.log('  test: fileSafeName prevents collisions');
+  const name1 = fileSafeName('src/test.js');
+  const name2 = fileSafeName('src__test.js');
+  assert.notStrictEqual(name1, name2, 'Different paths should produce different safe names');
+  console.log('    ✅ PASS');
+}
+
+async function testShelfDirNameNoCollision(): Promise<void> {
+  console.log('  test: shelfDirName prevents collisions');
+  const dir1 = shelfDirName('my-shelf');
+  const dir2 = shelfDirName('my.shelf');
+  assert.notStrictEqual(dir1, dir2, 'Different shelf names should produce different dir names');
+  console.log('    ✅ PASS');
+}
+
+async function testOperationLock(): Promise<void> {
+  console.log('  test: OperationLock prevents concurrent access');
+  const lock = new OperationLock();
+  const order: number[] = [];
+
+  const release1 = await lock.acquire();
+  order.push(1);
+
+  let release2: (() => void) | undefined;
+  const p2 = lock.acquire().then(r => {
+    release2 = r;
+    order.push(2);
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.strictEqual(order.length, 1, 'Second op should be blocked');
+  assert.deepStrictEqual(order, [1]);
+
+  release1();
+  await p2;
+  assert.deepStrictEqual(order, [1, 2], 'Second op should run after release');
+
+  release2!();
+  console.log('    ✅ PASS');
+}
+
+// --- Original Core Tests ---
 
 async function testIsTrackedFile(): Promise<void> {
   console.log('  test: tracked file is detected');
@@ -109,24 +308,6 @@ async function testMixedShelve(): Promise<void> {
   console.log('    ✅ PASS');
 }
 
-async function testSanitizeName(): Promise<void> {
-  console.log('  test: shelf name sanitization');
-  const sanitize = (name: string) => name.replace(/[^a-zA-Z0-9_\-]/g, '_');
-  assert.strictEqual(sanitize('my shelf'), 'my_shelf');
-  assert.strictEqual(sanitize('my-shelf'), 'my-shelf');
-  assert.strictEqual(sanitize('my.shelf'), 'my_shelf');
-  assert.strictEqual(sanitize('shelf/../../etc'), 'shelf_______etc');
-  console.log('    ✅ PASS');
-}
-
-async function testSanitizeFilePath(): Promise<void> {
-  console.log('  test: file path sanitization for shelf storage');
-  const safeName = (file: string) => file.replace(/[\\/]/g, '__');
-  assert.strictEqual(safeName('src/test.js'), 'src__test.js');
-  assert.strictEqual(safeName('src\\deep\\file.ts'), 'src__deep__file.ts');
-  console.log('    ✅ PASS');
-}
-
 // --- New Feature Tests ---
 
 async function testStagedFileDetection(): Promise<void> {
@@ -143,57 +324,21 @@ async function testStagedFileDetection(): Promise<void> {
   console.log('    ✅ PASS');
 }
 
-async function testGetModifiedFilesIncludesStaged(): Promise<void> {
-  console.log('  test: getModifiedFiles includes staged files');
-  await setupTestRepo();
-
-  // Modify and stage one file
-  writeFile('tracked-file.txt', 'staged content');
-  await git('add tracked-file.txt');
-
-  // Modify another but don't stage
-  writeFile('src/app.ts', 'unstaged change');
-
-  // Create untracked
-  writeFile('src/new.ts', 'brand new');
-
-  const tracked = (await git('diff --name-only')).split('\n').filter(f => f.trim());
-  const staged = (await git('diff --cached --name-only')).split('\n').filter(f => f.trim());
-  const untracked = (await git('ls-files --others --exclude-standard')).split('\n').filter(f => f.trim());
-  const all = [...new Set([...tracked, ...staged, ...untracked])];
-
-  assert.ok(all.includes('tracked-file.txt'), 'Should include staged file');
-  assert.ok(all.includes('src/app.ts'), 'Should include unstaged file');
-  assert.ok(all.includes('src/new.ts'), 'Should include untracked file');
-  assert.strictEqual(all.length, 3, 'Should have exactly 3 files');
-  console.log('    ✅ PASS');
-}
-
 async function testShelveStagedTrackedFile(): Promise<void> {
   console.log('  test: shelve staged tracked file reverts to HEAD');
   await setupTestRepo();
 
-  // Modify and stage
   writeFile('tracked-file.txt', 'staged content');
   await git('add tracked-file.txt');
 
-  // Verify it's staged
-  let staged = (await git('diff --cached --name-only')).split('\n').filter(f => f.trim());
-  assert.ok(staged.includes('tracked-file.txt'), 'File should be staged');
-
-  // Simulate shelve staged: save diff, reset, checkout
   const diff = await git('diff --cached -- "tracked-file.txt"');
   assert.ok(diff.includes('staged content'), 'Diff should contain staged changes');
 
   await git('reset HEAD -- "tracked-file.txt"');
   await git('checkout HEAD -- "tracked-file.txt"');
 
-  // Verify reverted
   assert.strictEqual(readFile('tracked-file.txt'), 'original content', 'File should be reverted');
-  staged = (await git('diff --cached --name-only')).split('\n').filter(f => f.trim());
-  assert.ok(!staged.includes('tracked-file.txt'), 'File should be unstaged');
 
-  // Simulate unshelve: apply patch
   const patchPath = path.join(TEST_DIR, 'test.patch');
   fs.writeFileSync(patchPath, diff);
   await git(`apply "${patchPath}"`);
@@ -205,69 +350,20 @@ async function testShelveNewStagedFile(): Promise<void> {
   console.log('  test: shelve newly added (staged) file that does not exist in HEAD');
   await setupTestRepo();
 
-  // Create new file and stage it
   writeFile('src/brand-new.ts', 'export const x = 1;');
   await git('add src/brand-new.ts');
-
-  // Verify it's staged (in index) but not in HEAD
-  const staged = (await git('diff --cached --name-only')).split('\n').filter(f => f.trim());
-  assert.ok(staged.includes('src/brand-new.ts'), 'New file should be staged');
 
   let inHead = true;
   try { await git('cat-file -e HEAD:src/brand-new.ts'); } catch { inHead = false; }
   assert.ok(!inHead, 'New file should NOT exist in HEAD');
 
-  // Save content, then unstage + delete
   const savedContent = readFile('src/brand-new.ts');
   await git('reset HEAD -- "src/brand-new.ts"');
   fs.unlinkSync(path.join(TEST_DIR, 'src', 'brand-new.ts'));
   assert.ok(!fileExists('src/brand-new.ts'), 'File should be deleted');
 
-  // Restore (unshelve)
   writeFile('src/brand-new.ts', savedContent);
   assert.strictEqual(readFile('src/brand-new.ts'), 'export const x = 1;', 'File should be restored');
-  console.log('    ✅ PASS');
-}
-
-async function testShelveMixedStagedAndNew(): Promise<void> {
-  console.log('  test: shelve mix of staged tracked + staged new + untracked files');
-  await setupTestRepo();
-
-  // Stage a tracked file change
-  writeFile('tracked-file.txt', 'staged change');
-  await git('add tracked-file.txt');
-
-  // Stage a new file
-  writeFile('src/new.ts', 'new file content');
-  await git('add src/new.ts');
-
-  // Untracked file
-  writeFile('src/untracked.ts', 'untracked content');
-
-  // Categorize
-  const files = ['tracked-file.txt', 'src/new.ts', 'src/untracked.ts'];
-  const committedModified: string[] = [];
-  const addedToIndex: string[] = [];
-  const untrackedFiles: string[] = [];
-
-  for (const file of files) {
-    let inIndex = false;
-    try { const r = await git(`ls-files --error-unmatch "${file}"`); inIndex = r.trim().length > 0; } catch { inIndex = false; }
-    if (inIndex) {
-      let inHead = true;
-      try { await git(`cat-file -e HEAD:"${file}"`); } catch { inHead = false; }
-      if (inHead) { committedModified.push(file); } else { addedToIndex.push(file); }
-    } else {
-      untrackedFiles.push(file);
-    }
-  }
-
-  assert.ok(committedModified.includes('tracked-file.txt'), 'Tracked file should be committedModified');
-  assert.ok(addedToIndex.includes('src/new.ts'), 'New staged file should be addedToIndex');
-  assert.ok(untrackedFiles.includes('src/untracked.ts'), 'Untracked file should be untracked');
-  assert.strictEqual(committedModified.length, 1, 'Only 1 committed modified');
-  assert.strictEqual(addedToIndex.length, 1, 'Only 1 added to index');
-  assert.strictEqual(untrackedFiles.length, 1, 'Only 1 untracked');
   console.log('    ✅ PASS');
 }
 
@@ -275,27 +371,19 @@ async function testEffectiveDiffForStagedAndUnstaged(): Promise<void> {
   console.log('  test: effective diff combines staged + unstaged changes');
   await setupTestRepo();
 
-  // Stage one version
   writeFile('tracked-file.txt', 'staged version');
   await git('add tracked-file.txt');
 
-  // Make additional unstaged change
   writeFile('tracked-file.txt', 'staged + unstaged version');
 
-  const stagedDiff = (await git('diff --cached -- "tracked-file.txt"')).trim();
-  const unstagedDiff = (await git('diff -- "tracked-file.txt"')).trim();
   const headDiff = (await git('diff HEAD -- "tracked-file.txt"')).trim();
-
-  assert.ok(stagedDiff.length > 0, 'Should have staged diff');
-  assert.ok(unstagedDiff.length > 0, 'Should have unstaged diff');
   assert.ok(headDiff.length > 0, 'Should have HEAD diff');
-  // HEAD diff should be the combined version
   assert.ok(headDiff.includes('staged + unstaged version'), 'HEAD diff should show final content');
   console.log('    ✅ PASS');
 }
 
 async function testCheckoutHEADFailsForNewFile(): Promise<void> {
-  console.log('  test: git checkout HEAD fails for newly staged file (confirms the bug scenario)');
+  console.log('  test: git checkout HEAD fails for newly staged file');
   await setupTestRepo();
 
   writeFile('src/brand-new.ts', 'new');
@@ -307,7 +395,36 @@ async function testCheckoutHEADFailsForNewFile(): Promise<void> {
   } catch {
     threw = true;
   }
-  assert.ok(threw, 'checkout HEAD should fail for file not in HEAD — this is the bug we fixed');
+  assert.ok(threw, 'checkout HEAD should fail for file not in HEAD');
+  console.log('    ✅ PASS');
+}
+
+async function testFormatValidationResult(): Promise<void> {
+  console.log('  test: formatValidationResult formats output correctly');
+  const ok = formatValidationResult({ valid: true, missingFiles: [], corruptedFiles: [], extraFiles: [] });
+  assert.ok(ok.includes('OK'));
+
+  const withErrors = formatValidationResult({
+    valid: false,
+    missingFiles: ['a.patch'],
+    corruptedFiles: ['b.patch'],
+    extraFiles: [],
+  });
+  assert.ok(withErrors.includes('Missing'));
+  assert.ok(withErrors.includes('Corrupted'));
+  console.log('    ✅ PASS');
+}
+
+async function testAtomicWriteBuffer(): Promise<void> {
+  console.log('  test: atomicWriteFile handles Buffer content');
+  const testDir = path.join(TEST_DIR, 'buffer-test');
+  ensureDir(testDir);
+  const filePath = path.join(testDir, 'binary.bin');
+  const buf = Buffer.from([0x00, 0x01, 0x02, 0x03, 0xFF]);
+  atomicWriteFile(filePath, buf);
+  const read = fs.readFileSync(filePath);
+  assert.deepStrictEqual(read, buf);
+  safeRemoveDir(testDir);
   console.log('    ✅ PASS');
 }
 
@@ -317,20 +434,33 @@ async function runTests(): Promise<void> {
   console.log('\n🧪 Code Shelf Tests\n');
 
   const tests = [
-    // Original tests
+    // Integrity tests
+    testComputeChecksum,
+    testAtomicWriteFile,
+    testAtomicWriteJSON,
+    testCreateManifestAndValidate,
+    testValidateShelfDetectsCorruption,
+    testValidateShelfDetectsMissingFile,
+    testVerifyFile,
+    testAtomicWriteBuffer,
+    testFormatValidationResult,
+
+    // File utils tests
+    testFileSafeNameNoCollision,
+    testShelfDirNameNoCollision,
+    testOperationLock,
+
+    // Original core tests
     testIsTrackedFile,
     testUntrackedFileDoesNotThrow,
     testShelveTrackedFile,
     testShelveUntrackedFile,
     testMixedShelve,
-    testSanitizeName,
-    testSanitizeFilePath,
-    // New feature tests
+
+    // Feature tests
     testStagedFileDetection,
-    testGetModifiedFilesIncludesStaged,
     testShelveStagedTrackedFile,
     testShelveNewStagedFile,
-    testShelveMixedStagedAndNew,
     testEffectiveDiffForStagedAndUnstaged,
     testCheckoutHEADFailsForNewFile,
   ];

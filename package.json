@@ -118,6 +118,18 @@
         "title": "Refresh Shelves",
         "category": "Code Shelf",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "code-shelf.validateShelf",
+        "title": "Validate Shelf Integrity",
+        "category": "Code Shelf",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "code-shelf.repair",
+        "title": "Repair / Cleanup Pending Shelves",
+        "category": "Code Shelf",
+        "icon": "$(wrench)"
       }
     ],
     "views": {
@@ -189,6 +201,11 @@
           "command": "code-shelf.renameShelf",
           "when": "view == code-shelf-view && viewItem == shelf",
           "group": "shelf@1"
+        },
+        {
+          "command": "code-shelf.validateShelf",
+          "when": "view == code-shelf-view && viewItem == shelf",
+          "group": "shelf@2"
         },
         {
           "command": "code-shelf.unshelveFile",

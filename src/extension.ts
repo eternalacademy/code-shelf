@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ShelfManager } from './shelfManager';
 import { ShelfTreeProvider, ShelfTreeItem } from './shelfTreeProvider';
+import { formatValidationResult } from './integrity';
 
 let manager: ShelfManager;
 let treeProvider: ShelfTreeProvider;
@@ -18,6 +20,12 @@ export function activate(context: vscode.ExtensionContext) {
     showCollapseAll: true
   });
   context.subscriptions.push(treeView);
+
+  manager.repairPendingShelves().then((cleaned) => {
+    if (cleaned.length > 0) {
+      vscode.window.showInformationMessage(`Code Shelf: Cleaned up ${cleaned.length} pending shelf directory(ies).`);
+    }
+  }).catch(() => { /* best effort */ });
 
   // ─── Shelve Changes ───
   context.subscriptions.push(
@@ -225,7 +233,6 @@ export function activate(context: vscode.ExtensionContext) {
       if (!name) return;
 
       if (filePath) {
-        // Single file — show proper diff editor
         const contents = await manager.getDiffContents(name, filePath);
         if (!contents) {
           vscode.window.showInformationMessage('No diff content.');
@@ -239,7 +246,6 @@ export function activate(context: vscode.ExtensionContext) {
           originalDoc.uri, modifiedDoc.uri, title
         );
       } else {
-        // Whole shelf — show combined patch view
         const diff = manager.getShelfDiff(name);
         if (!diff) {
           vscode.window.showInformationMessage('No diff content.');
@@ -255,6 +261,40 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('code-shelf.refresh', () => {
       treeProvider.refresh();
+    })
+  );
+
+  // ─── Validate Shelf Integrity ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.validateShelf', async (item?: ShelfTreeItem) => {
+      const name = item?.shelfName || await pickShelf();
+      if (!name) return;
+
+      const result = await manager.validateShelfByName(name);
+      if (result === null) {
+        vscode.window.showErrorMessage(`Shelf "${name}" not found.`);
+        return;
+      }
+
+      if (result.valid) {
+        vscode.window.showInformationMessage(`Shelf "${name}" integrity: OK — all files verified.`);
+      } else {
+        const details = formatValidationResult(result);
+        vscode.window.showErrorMessage(`Shelf "${name}" integrity check FAILED:\n${details}`, { modal: true });
+      }
+    })
+  );
+
+  // ─── Repair / Cleanup ───
+  context.subscriptions.push(
+    vscode.commands.registerCommand('code-shelf.repair', async () => {
+      const cleaned = await manager.repairPendingShelves();
+      if (cleaned.length === 0) {
+        vscode.window.showInformationMessage('No pending shelves to clean up.');
+      } else {
+        vscode.window.showInformationMessage(`Cleaned up ${cleaned.length} pending shelf director(ies):\n${cleaned.join('\n')}`);
+        treeProvider.refresh();
+      }
     })
   );
 
@@ -277,7 +317,5 @@ export function activate(context: vscode.ExtensionContext) {
     return picked?.label;
   }
 }
-
-import * as path from 'path';
 
 export function deactivate() {}
