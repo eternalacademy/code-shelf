@@ -1,0 +1,28 @@
+$ npx @vscode/vsce package --no-dependencies --out docs/pr-assets/code-shelf-pr-proof.vsix
+Executing prepublish script 'npm run vscode:prepublish'...
+
+> code-shelf@1.4.1 vscode:prepublish
+> npm run compile
+
+
+> code-shelf@1.4.1 compile
+> tsc -p ./
+
+ INFO  Files included in the VSIX:
+code-shelf-pr-proof.vsix
+├─ [Content_Types].xml 
+├─ extension.vsixmanifest 
+└─ extension/
+   ├─ LICENSE.txt [1.05 KB]
+   ├─ package.json [6.13 KB]
+   ├─ readme.md [2.5 KB]
+   ├─ media/
+   │  └─ icon.png [6.72 KB]
+   └─ out/
+      ├─ extension.js [12.9 KB]
+      ├─ fileUtils.js [4.4 KB]
+      ├─ integrity.js [5.44 KB]
+      ├─ shelfManager.js [28.75 KB]
+      └─ shelfTreeProvider.js [5.07 KB]
+
+ DONE  Packaged: docs/pr-assets/code-shelf-pr-proof.vsix (11 files, 25.06 KB)

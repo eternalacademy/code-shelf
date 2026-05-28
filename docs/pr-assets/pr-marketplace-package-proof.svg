@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="510" viewBox="0 0 1200 510">
+<rect width="100%" height="100%" fill="#0d1117"/>
+<style>text{font-family:Consolas,Monaco,monospace;font-size:15px;white-space:pre}</style>
+<text x="24" y="28" fill="#7ee787">Code Shelf PR proof: Marketplace package slimmed</text>
+<text x="24" y="50" fill="#c9d1d9"></text>
+<text x="24" y="72" fill="#ffa657">Before: 14 files, 649.44 KB; included .gitignore, tsconfig.json, out/test/shelf.test.js</text>
+<text x="24" y="94" fill="#7ee787">After:  11 files, 25.06 KB; runtime files only; icon.png 6.72 KB</text>
+<text x="24" y="116" fill="#c9d1d9"></text>
+<text x="24" y="138" fill="#c9d1d9"> INFO  Files included in the VSIX:</text>
+<text x="24" y="160" fill="#c9d1d9">├─ [Content_Types].xml</text>
+<text x="24" y="182" fill="#c9d1d9">├─ extension.vsixmanifest</text>
+<text x="24" y="204" fill="#c9d1d9">└─ extension/</text>
+<text x="24" y="226" fill="#c9d1d9">   ├─ LICENSE.txt [1.05 KB]</text>
+<text x="24" y="248" fill="#c9d1d9">   ├─ package.json [6.13 KB]</text>
+<text x="24" y="270" fill="#c9d1d9">   ├─ readme.md [2.5 KB]</text>
+<text x="24" y="292" fill="#c9d1d9">   ├─ media/</text>
+<text x="24" y="314" fill="#c9d1d9">   │  └─ icon.png [6.72 KB]</text>
+<text x="24" y="336" fill="#c9d1d9">   └─ out/</text>
+<text x="24" y="358" fill="#c9d1d9">      ├─ extension.js [12.9 KB]</text>
+<text x="24" y="380" fill="#c9d1d9">      ├─ fileUtils.js [4.4 KB]</text>
+<text x="24" y="402" fill="#c9d1d9">      ├─ integrity.js [5.44 KB]</text>
+<text x="24" y="424" fill="#c9d1d9">      ├─ shelfManager.js [28.75 KB]</text>
+<text x="24" y="446" fill="#c9d1d9">      └─ shelfTreeProvider.js [5.07 KB]</text>
+<text x="24" y="468" fill="#7ee787"> DONE  Packaged: docs/pr-assets/code-shelf-pr-proof.vsix (11 files, 25.06 KB)</text>
+</svg>

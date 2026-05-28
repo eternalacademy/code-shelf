@@ -6,3 +6,12 @@ node_modules/**
 .vscode-test/**
 test-workspace/**
 FEATURES.md
+.gitignore
+.vscode/**
+tsconfig.json
+out/test/**
+**/*.test.js
+**/*.test.d.ts
+code-shelf-*.vsix
+*.vsix
+docs/pr-assets/**

@@ -54,6 +54,15 @@ function cleanup(): void {
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
 }
 
+function getPngDimensions(filePath: string): { width: number; height: number } {
+  const buffer = fs.readFileSync(filePath);
+  assert.strictEqual(buffer.toString('ascii', 1, 4), 'PNG', 'File should be a PNG image');
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+  };
+}
+
 async function setupTestRepo(): Promise<void> {
   cleanup();
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -428,6 +437,27 @@ async function testAtomicWriteBuffer(): Promise<void> {
   console.log('    ✅ PASS');
 }
 
+async function testMarketplacePackageIgnoresDevOnlyFiles(): Promise<void> {
+  console.log('  test: marketplace package ignores dev-only files');
+  const ignorePath = path.join(__dirname, '..', '..', '.vscodeignore');
+  const ignore = fs.readFileSync(ignorePath, 'utf-8');
+  for (const pattern of ['.gitignore', 'tsconfig.json', 'out/test/**', '**/*.test.js', 'code-shelf-*.vsix', 'docs/pr-assets/**']) {
+    assert.ok(ignore.includes(pattern), `Expected .vscodeignore to include ${pattern}`);
+  }
+  console.log('    ✅ PASS');
+}
+
+async function testMarketplaceIconIsOptimized(): Promise<void> {
+  console.log('  test: marketplace icon is optimized');
+  const iconPath = path.join(__dirname, '..', '..', 'media', 'icon.png');
+  const { width, height } = getPngDimensions(iconPath);
+  const size = fs.statSync(iconPath).size;
+  assert.strictEqual(width, 128, 'Marketplace icon should be 128px wide');
+  assert.strictEqual(height, 128, 'Marketplace icon should be 128px tall');
+  assert.ok(size < 100 * 1024, `Marketplace icon should be under 100KB; got ${size} bytes`);
+  console.log('    ✅ PASS');
+}
+
 // --- Run all tests ---
 
 async function runTests(): Promise<void> {
@@ -463,6 +493,10 @@ async function runTests(): Promise<void> {
     testShelveNewStagedFile,
     testEffectiveDiffForStagedAndUnstaged,
     testCheckoutHEADFailsForNewFile,
+
+    // Release packaging tests
+    testMarketplacePackageIgnoresDevOnlyFiles,
+    testMarketplaceIconIsOptimized,
   ];
 
   let passed = 0;
